@@ -108,7 +108,12 @@ static esp_ble_adv_params_t heart_rate_adv_params = {
     .adv_int_min        = 0x100,
     .adv_int_max        = 0x100,
     .adv_type           = ADV_TYPE_IND,
-    .own_addr_type      = BLE_ADDR_TYPE_RPA_PUBLIC,
+    // Public, not RPA. A resolvable private address rotates, and iOS can only
+    // match a bond across rotations via the identity key -- which is regenerated
+    // on every GATT registration below, so each connection looked like a new
+    // device and re-paired from scratch. Nothing is lost by advertising the
+    // public address: the device name is literally WiC_<mac>.
+    .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
     .channel_map        = ADV_CHNL_ALL,
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
@@ -241,12 +246,12 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] =
 	    // be the max MTU supported by BLE.
 	    /* Characteristic Value */
 	    [IDX_CHAR_VAL_A] =
-			{{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&GATTS_CHAR_UUID_TEST_A, ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM,
+			{{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&GATTS_CHAR_UUID_TEST_A, ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED,
 	      GATTS_DEMO_CHAR_VAL_LEN_MAX, sizeof(test1), (uint8_t *)test1}},
 
 	    /* Client Characteristic Configuration Descriptor */
 	    [IDX_CHAR_CFG_A]  =
-			{{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM,
+			{{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED,
 	      sizeof(uint16_t), sizeof(heart_measurement_ccc), (uint8_t *)heart_measurement_ccc}},
 
 		/* Characteristic Declaration */
@@ -256,7 +261,7 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] =
 
 		/* Characteristic Value */
 		[IDX_CHAR_VAL_C]  =
-			{{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_16, (uint8_t *)&GATTS_CHAR_UUID_TEST_C, ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM,
+			{{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_16, (uint8_t *)&GATTS_CHAR_UUID_TEST_C, ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED,
 		  GATTS_DEMO_CHAR_VAL_LEN_MAX, sizeof(char_value), (uint8_t *)char_value}},
 
 };
@@ -488,8 +493,9 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     switch (event) {
         case ESP_GATTS_REG_EVT:
             esp_ble_gap_set_device_name((const char*)dev_name);
-            //generate a resolvable random address
-            esp_ble_gap_config_local_privacy(true);
+            // Privacy off: see own_addr_type above. With it on, the bond never
+            // survived a reconnect.
+            esp_ble_gap_config_local_privacy(false);
             esp_ble_gatts_create_attr_tab(gatt_db, gatts_if,
                                       HRS_IDX_NB, HEART_RATE_SVC_INST_ID);
             break;
@@ -893,14 +899,22 @@ void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t conn
         ESP_LOGE(GATTS_TABLE_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
 	/* set the security iocap & auth_req & key size & init key response key parameters to the stack*/
-	esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;     //bonding with peer device after authentication
-	esp_ble_io_cap_t iocap = ESP_IO_CAP_OUT;           //set the IO capability to No output No input
+	// Just Works rather than passkey entry. The stock config asked for
+	// SC + MITM with DisplayOnly IO and a static passkey, which forces the
+	// central to show a keypad -- and on iOS that dialog never appeared, so
+	// every read/write was refused with "insufficient authentication" and the
+	// adapter was unusable. Dropping MITM keeps the link bonded and encrypted
+	// but removes the passkey exchange entirely.
+	esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
+	esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;          // no display and no keyboard
 	uint8_t key_size = 16;      //the key size should be 7~16 bytes
 	uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
 	uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
 	//set static passkey
 //	uint32_t passkey = 123456;
-	uint8_t auth_option = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
+	// Must not stay ENABLE: it rejects any pairing that doesn't meet auth_req
+	// exactly, with no negotiation and no fallback.
+	uint8_t auth_option = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_DISABLE;
 	uint8_t oob_support = ESP_BLE_OOB_DISABLE;
 
 	esp_ble_gap_set_security_param(ESP_BLE_SM_CLEAR_STATIC_PASSKEY, &ble_pass_key, sizeof(uint32_t));
