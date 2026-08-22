@@ -287,6 +287,10 @@ static struct {
     // is the car in READY? tracked from 0x038 edges; stays false on platforms
     // where that frame is unavailable
     bool car_in_ready;
+    // what the car last reported in its status frame (precon_car_status_t).
+    // requested.status_seen is a high-water mark scoped to one attempt; this is
+    // the plain latest value, which is what a status query wants to report
+    uint8_t last_car_status;
 } platform;
 
 // activation button edge tracking, owned by the global hooks
@@ -300,6 +304,17 @@ static struct {
 } button;
 
 static QueueHandle_t battery_temperature_queue = NULL;
+
+// Activation requests posted by other tasks (the ELM327/BLE task). Drained from
+// the global tick hook rather than applied at the call site, so the machine and
+// its globals stay owned by the CAN task exactly as the button path is.
+#define PRECONDITION_REMOTE_QUEUE_DEPTH 4
+static QueueHandle_t remote_request_queue = NULL;
+
+// Public status snapshot, republished every tick. 1-deep and overwritten, the
+// same "latest value wins" shape as battery_temperature_queue: a reader wants
+// the current state, never a backlog of old ones.
+static QueueHandle_t status_queue = NULL;
 
 // ********************* config caches *********************
 
@@ -995,8 +1010,101 @@ static const sm_state_t S_WAIT_STOPPED = {
 
 // ********************* global hooks *********************
 
+// Apply activation requests queued by another task. Runs here, inside a real
+// dispatch, for the same reason the long-press trigger below does: sm_send_event
+// may transition, and the engine defers a transition raised from a hook until
+// the dispatch it interrupts has finished.
+//
+// START and STOP are edge-guarded rather than passed straight through, because
+// EV_TOGGLE means "the other way" to every state that handles it -- an
+// unguarded second START would stop a session that was already starting.
+static void apply_remote_requests(sm_t *sm) {
+    if (remote_request_queue == NULL) {
+        return;
+    }
+    uint8_t action;
+    while (xQueueReceive(remote_request_queue, &action, 0) == pdTRUE) {
+        bool start_in_flight = sm_in(sm, &S_REQUESTED);
+        bool stop_in_flight = sm_in(sm, &S_STOPPING);
+        bool wanted;
+        switch (action) {
+            case PRECON_REMOTE_START:
+                wanted = !start_in_flight && !stop_in_flight;
+                break;
+            case PRECON_REMOTE_STOP:
+                wanted = start_in_flight;
+                break;
+            default:  // PRECON_REMOTE_TOGGLE: whatever the button would have done
+                wanted = true;
+                break;
+        }
+        ESP_LOGI(TAG, "remote request %u: %s", (unsigned)action, wanted ? "applied" : "ignored");
+        if (wanted) {
+            sm_send_event(sm, EV_TOGGLE);
+        }
+    }
+}
+
+// Snapshot the machine for remote status queries, so a reader on another task
+// never touches these globals directly.
+static void publish_status(sm_t *sm) {
+    if (status_queue == NULL) {
+        return;
+    }
+
+    precondition_status_t status = {
+        .state = PRECON_STATE_IDLE,
+        .car_status = platform.last_car_status,
+        .seconds_remaining = 0U,
+        .batt_min_c = 0,
+        .batt_max_c = 0,
+        .flags = 0U,
+    };
+
+    // The leaf carries the distinction a caller cares about; sm_in would only
+    // say "somewhere under REQUESTED", which spans both a live start burst and
+    // a session the BMU already owns.
+    const sm_state_t *leaf = sm->current;
+    if (leaf == &S_START_BURST || leaf == &S_WAIT_STARTING || leaf == &S_WAIT_STARTED) {
+        status.state = PRECON_STATE_STARTING;
+        status.seconds_remaining = (uint16_t)SECONDS_UNTIL_START(
+            ts_elapsed(sm_now(sm), requested.last_attempt_ts));
+    } else if (leaf == &S_STOP_BURST || leaf == &S_WAIT_STOPPED) {
+        status.state = PRECON_STATE_STOPPING;
+        status.seconds_remaining = (uint16_t)SECONDS_UNTIL_STOP_RETRY(
+            ts_elapsed(sm_now(sm), stopping.last_attempt_ts));
+    } else if (leaf == &S_ACTIVE) {
+        status.state = PRECON_STATE_ACTIVE;
+    } else if (leaf == &S_MANAGED) {
+        status.state = PRECON_STATE_MANAGED;
+    } else if (leaf == &S_CAR_START_DELAY) {
+        status.state = PRECON_STATE_REQUESTED;
+    }
+
+    if (platform.car_in_ready) {
+        status.flags |= PRECON_FLAG_CAR_READY;
+    }
+    if (platform.status_frame_available) {
+        status.flags |= PRECON_FLAG_STATUS_FRAME;
+    }
+    if (button.pressed) {
+        status.flags |= PRECON_FLAG_BUTTON_HELD;
+    }
+
+    precondition_temperature_t temperature;
+    if (precondition_get_battery_temperature(&temperature)) {
+        status.batt_min_c = temperature.min_c;
+        status.batt_max_c = temperature.max_c;
+        status.flags |= PRECON_FLAG_TEMP_VALID;
+    }
+
+    xQueueOverwrite(status_queue, &status);
+}
+
 static void precondition_global_tick(sm_t *sm) {
     flush_repeating_enabled(sm);
+
+    apply_remote_requests(sm);
 
     // long press mode: trigger once when the hold crosses the threshold, without
     // waiting for the release frame. state only becomes pressed via the rx hook,
@@ -1034,10 +1142,13 @@ static void precondition_global_rx(sm_t *sm, const twai_message_t *to_push, can_
 
         uint8_t status = to_push->data[1];
         if (STATUS_STARTED(status)) {
+            platform.last_car_status = PRECON_CAR_STARTED;
             sm_send_event(sm, EV_STATUS_STARTED);
         } else if (STATUS_STARTING(status)) {
+            platform.last_car_status = PRECON_CAR_STARTING;
             sm_send_event(sm, EV_STATUS_STARTING);
         } else if (STATUS_IDLE(status)) {
+            platform.last_car_status = PRECON_CAR_IDLE;
             sm_send_event(sm, EV_STATUS_IDLE);
         }
     }
@@ -1093,12 +1204,40 @@ static const sm_hooks_t precondition_global_hooks = {
 void precondition_init(void) {
     battery_temperature_queue = xQueueCreate(1, sizeof(precondition_temperature_t));
     configASSERT(battery_temperature_queue != NULL);
+    remote_request_queue = xQueueCreate(PRECONDITION_REMOTE_QUEUE_DEPTH, sizeof(uint8_t));
+    configASSERT(remote_request_queue != NULL);
+    status_queue = xQueueCreate(1, sizeof(precondition_status_t));
+    configASSERT(status_queue != NULL);
     sm_init(&precon_sm, "precondition", &S_IDLE, &precondition_global_hooks);
 }
 
 // called every 40ms
 void precondition_tick(void) {
     sm_tick(&precon_sm);
+    // after the tick, so a query answered between ticks reports the state the
+    // machine actually settled in rather than the one it was leaving
+    publish_status(&precon_sm);
+}
+
+void precondition_request_remote(precon_remote_action_t action) {
+    if (remote_request_queue == NULL) {
+        return;
+    }
+    uint8_t queued = (uint8_t)action;
+    // Never block: this runs on whichever task took the BLE command, and a full
+    // queue means four requests are already pending 40ms of tick -- dropping the
+    // fifth is right.
+    if (xQueueSend(remote_request_queue, &queued, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "remote request dropped: queue full");
+    }
+}
+
+bool precondition_get_status(precondition_status_t *out) {
+    if (out == NULL || status_queue == NULL) {
+        return false;
+    }
+
+    return xQueuePeek(status_queue, out, 0) == pdTRUE;
 }
 
 void precondition_can_rx_hook(twai_message_t *to_push, can_bus_t rx_bus) {

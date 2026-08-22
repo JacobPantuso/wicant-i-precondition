@@ -30,12 +30,14 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdio.h>
 #include "driver/twai.h"
 #include "slcan.h"
 #include "can.h"
 #include "std_pid.h"
 #include "sleep_mode.h"
 #include "elm327.h"
+#include "precondition.h"
 
 #define TAG 		__func__
 
@@ -1014,6 +1016,65 @@ static int8_t elm327_request(char *cmd, char *rsp, QueueHandle_t *queue)
 }
 
 
+/*
+ * ATXPC - battery preconditioning (electroniq harness).
+ *
+ * Not a real ELM327 command. "x" is the vendor-extension prefix and no stock
+ * command in the table below starts with one, so the prefix match in
+ * elm327_process_cmd cannot resolve a stock command to this one or vice versa.
+ *
+ *   ATXPC   query  -> XPC:<state>,<car>,<secs>,<tmin>,<tmax>,<flags>
+ *   ATXPC0  stop
+ *   ATXPC1  start
+ *   ATXPC2  toggle (identical to pressing the harness button)
+ *
+ * The requests only queue work; precondition_tick() applies them on the CAN
+ * task, so a status query issued straight after a start still reports the old
+ * state for up to one 40ms tick. Callers should poll rather than assume.
+ */
+static char* elm327_precondition(const char* command_str)
+{
+	static char response[64];
+
+	switch(command_str[3])
+	{
+		case '0':
+			precondition_request_remote(PRECON_REMOTE_STOP);
+			return (char*)ok_str;
+		case '1':
+			precondition_request_remote(PRECON_REMOTE_START);
+			return (char*)ok_str;
+		case '2':
+			precondition_request_remote(PRECON_REMOTE_TOGGLE);
+			return (char*)ok_str;
+		case 0:
+			break;			// bare ATXPC: status query, handled below
+		default:
+			// Returning NULL leaves cmd_found_flag clear, so the caller answers
+			// '?' the way a real ELM327 does for an unrecognised command.
+			return NULL;
+	}
+
+	precondition_status_t status;
+
+	if(!precondition_get_status(&status))
+	{
+		// no tick has published yet (or precondition_init never ran)
+		strcpy(response, "XPC:NA");
+		return response;
+	}
+
+	snprintf(response, sizeof(response), "XPC:%u,%u,%u,%d,%d,%u",
+			 (unsigned)status.state,
+			 (unsigned)status.car_status,
+			 (unsigned)status.seconds_remaining,
+			 (int)status.batt_min_c,
+			 (int)status.batt_max_c,
+			 (unsigned)status.flags);
+
+	return response;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1038,6 +1099,7 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"@", elm327_device_description},//display device description
 											{"i", elm327_identify},//identify yourself
 											{"m", elm327_return_ok},//memory off or on
+											{"xpc", elm327_precondition},//battery preconditioning (see above)
 
 											{NULL, NULL},
 									};
