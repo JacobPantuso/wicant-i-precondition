@@ -80,6 +80,7 @@ treat the `OK` as confirmation — the car itself takes tens of seconds to
 acknowledge a start.
 
 Due to this implementation, the firmware associated on this branch enables BLE by default. The AP is still accessible on initial startup after power cycling the device but sometimes the AP cannot be accessed.  
+
 ---
 ![Modes](https://user-images.githubusercontent.com/94690098/222961571-bd137341-808a-4f0a-9528-789fe24d640e.png "Connection Mode")
 ---
