@@ -2,47 +2,6 @@
 
 This is a fork of the [WiCAN firmware repository](https://github.com/meatpihq/wican-fw) designed to add custom CAN-based buttons. For now, the button added is a manual preconditioning button for first-generation E-GMP cars (2021-2024 Hyundai Ioniq 5 and EV6, 2023-2025 Ioniq 6). This is only possible through direct access to CAN busses with a [custom harness](https://github.com/tylerharvey/Ioniq5_CAN/wiring_harness/) that you can build or [buy](https://electroniqbuttons.com). See [our project coordination repository](https://github.com/tylerharvey/Ioniq5_CAN) for more background.
 
-# Remote activation over BLE (`ATXPC`)
-
-Alongside the harness button, preconditioning can be started and stopped by a
-BLE client talking to the WiCAN's ELM327 emulation — the same connection an OBD
-app already uses, so it needs no second transport and does not disturb normal
-PID reads.
-
-| Command  | Effect                                       | Reply |
-|----------|----------------------------------------------|-------|
-| `ATXPC`  | query status                                 | `XPC:<state>,<car>,<secs>,<tmin>,<tmax>,<flags>` |
-| `ATXPC0` | stop (no-op if nothing is running)           | `OK`  |
-| `ATXPC1` | start (no-op if already running)             | `OK`  |
-| `ATXPC2` | toggle — identical to pressing the button    | `OK`  |
-
-An adapter without this firmware answers `?`, which is how a client can tell the
-feature apart from a stock ELM327 without guessing.
-
-Status fields:
-
-- `state` — `0` idle, `1` requested, `2` starting, `3` active, `4` managed by the
-  BMU (repeating mode), `5` stopping
-- `car` — what the car reports in its own status frame: `0` unknown, `1` idle,
-  `2` starting, `3` started
-- `secs` — countdown to the next start/stop retry; `0` when nothing is pending
-- `tmin` / `tmax` — pack temperature extremes in °C, valid only when the
-  temperature flag is set
-- `flags` — bit 0 car in READY, bit 1 status frame seen, bit 2 button held,
-  bit 3 pack temperature valid
-
-Requests are queued and applied on the next 40 ms CAN tick, and the status
-snapshot is republished on that same tick, so a query issued immediately after a
-command can still report the previous state. Clients should poll rather than
-treat the `OK` as confirmation — the car itself takes tens of seconds to
-acknowledge a start.
-
-`ATXPC` is a vendor extension, not a real ELM327 command. The `x` prefix is
-deliberate: `elm327_process_cmd` resolves commands by first-match-wins prefix
-scan, and no stock command begins with `x` (the obvious name `pcon` would have
-been swallowed by the stock `pc`).
-
-Due to this implementation, the firmware associated on this branch enables BLE by default. The AP is still accessible on initial startup after power cycling the device but sometimes the AP cannot be accessed.  
 
 # [WiCAN Documentation](https://meatpihq.github.io/wican-fw/) | [Firmware updates](https://github.com/L1Z3/wicant-i-precondition/releases/) | [Fluxer server](https://fluxer.gg/w0OpDJjG)
 
@@ -84,6 +43,43 @@ Another great feature of WiCAN-OBD is its MQTT battery alerts. It can monitor yo
 - WiFi can be used in AP and station mode
 - WiFi and CAN configured using web interface.
 - Diode protection for the USB port
+
+### Remote activation over BLE (`ATXPC`)
+
+Alongside the harness button, preconditioning can be started and stopped by a
+BLE client talking to the WiCAN's ELM327 emulation — the same connection an OBD
+app already uses, so it needs no second transport and does not disturb normal
+PID reads.
+
+| Command  | Effect                                       | Reply |
+|----------|----------------------------------------------|-------|
+| `ATXPC`  | query status                                 | `XPC:<state>,<car>,<secs>,<tmin>,<tmax>,<flags>` |
+| `ATXPC0` | stop (no-op if nothing is running)           | `OK`  |
+| `ATXPC1` | start (no-op if already running)             | `OK`  |
+| `ATXPC2` | toggle — identical to pressing the button    | `OK`  |
+
+An adapter without this firmware answers `?`, which is how a client can tell the
+feature apart from a stock ELM327 without guessing.
+
+Status fields:
+
+- `state` — `0` idle, `1` requested, `2` starting, `3` active, `4` managed by the
+  BMU (repeating mode), `5` stopping
+- `car` — what the car reports in its own status frame: `0` unknown, `1` idle,
+  `2` starting, `3` started
+- `secs` — countdown to the next start/stop retry; `0` when nothing is pending
+- `tmin` / `tmax` — pack temperature extremes in °C, valid only when the
+  temperature flag is set
+- `flags` — bit 0 car in READY, bit 1 status frame seen, bit 2 button held,
+  bit 3 pack temperature valid
+
+Requests are queued and applied on the next 40 ms CAN tick, and the status
+snapshot is republished on that same tick, so a query issued immediately after a
+command can still report the previous state. Clients should poll rather than
+treat the `OK` as confirmation — the car itself takes tens of seconds to
+acknowledge a start.
+
+Due to this implementation, the firmware associated on this branch enables BLE by default. The AP is still accessible on initial startup after power cycling the device but sometimes the AP cannot be accessed.  
 
 ![Modes](https://user-images.githubusercontent.com/94690098/222961571-bd137341-808a-4f0a-9528-789fe24d640e.png "Connection Mode")
 
