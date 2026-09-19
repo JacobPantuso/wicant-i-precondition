@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include "esp_log.h"
@@ -285,8 +286,10 @@ static struct {
     // is the status frame available? false if on unknown platform, true if we at any point receive a known status frame
     bool status_frame_available;
     // is the car in READY? tracked from 0x038 edges; stays false on platforms
-    // where that frame is unavailable
-    bool car_in_ready;
+    // where that frame is unavailable. Shared with sleep/status readers;
+    // relaxed accesses suffice because this flag does not signal that other
+    // shared data is ready to read.
+    atomic_bool car_in_ready;
     // what the car last reported in its status frame (precon_car_status_t).
     // requested.status_seen is a high-water mark scoped to one attempt; this is
     // the plain latest value, which is what a status query wants to report
@@ -812,7 +815,7 @@ static bool active_event(sm_t *sm, sm_event_t ev) {
 // for car restarts.
 
 static void managed_tick(sm_t *sm) {
-    if (managed.idle_seen && platform.car_in_ready
+    if (managed.idle_seen && car_in_ready()
             && ts_elapsed(sm_now(sm), managed.nudge_base_ts) > REPEATING_MODE_RETRY_INTERVAL_US) {
         // targets the parent, so REQUESTED exits and re-enters: fresh attempt
         // ctx, kind set from the entry argument, descend into START_BURST
@@ -1081,7 +1084,7 @@ static void publish_status(sm_t *sm) {
         status.state = PRECON_STATE_REQUESTED;
     }
 
-    if (platform.car_in_ready) {
+    if (car_in_ready()) {
         status.flags |= PRECON_FLAG_CAR_READY;
     }
     if (platform.status_frame_available) {
@@ -1124,8 +1127,8 @@ static void precondition_global_rx(sm_t *sm, const twai_message_t *to_push, can_
             && rx_bus == CAR_BUS
             && to_push->data_length_code >= 1U) {
         bool ready = POWER_STATUS_READY(to_push->data[0]);
-        if (ready != platform.car_in_ready) {
-            platform.car_in_ready = ready;
+        if (ready != car_in_ready()) {
+            atomic_store_explicit(&platform.car_in_ready, ready, memory_order_relaxed);
             ESP_LOGI(TAG, "car power: %s", ready ? "ready" : "off");
             sm_send_event(sm, ready ? EV_CAR_READY : EV_CAR_NOT_READY);
         }
@@ -1259,4 +1262,8 @@ bool precondition_get_battery_temperature(precondition_temperature_t *out) {
     }
 
     return xQueuePeek(battery_temperature_queue, out, 0) == pdTRUE;
+}
+
+bool car_in_ready(void) {
+    return atomic_load_explicit(&platform.car_in_ready, memory_order_relaxed);
 }
