@@ -3,6 +3,33 @@
 This is a fork of the [WiCAN firmware repository](https://github.com/meatpihq/wican-fw) designed to add custom CAN-based buttons. For now, the button added is a manual preconditioning button for first-generation E-GMP cars (2021-2024 Hyundai Ioniq 5 and EV6, 2023-2025 Ioniq 6). This is only possible through direct access to CAN busses with a [custom harness](https://github.com/tylerharvey/Ioniq5_CAN/wiring_harness/) that you can build or [buy](https://electroniqbuttons.com). See [our project coordination repository](https://github.com/tylerharvey/Ioniq5_CAN) for more background.
 
 
+# This branch: the myIONIQ build
+
+`feature/myIONIQ` is the firmware for the **myIONIQ** iOS app on an IONIQ 6: all
+three feature branches together, each of which can also be used or upstreamed
+on its own:
+
+| Branch | Adds | Needs |
+|--------|------|-------|
+| `feature/ble-remote-trigger` | `ATXPC` battery preconditioning over BLE, BLE write clamp, boot heap report | — |
+| `feature/can-sniffer` | `ATXSN` CAN sniffer over BLE | the branch above |
+| `feature/cluster-nav` | `ATXNV`/`ATXNT` cluster and HUD turn-by-turn | the branch above |
+
+In the app: Settings → OBD → Preconditioning Adapter shows **CAN Sniffer**,
+**CarPlay Directions in Cluster** and **Cluster Codes** once the adapter answers
+`ATXSN` and `ATXNV`. The app and this firmware move together: the app splits
+long commands into BLE writes of 60 bytes, and sends the `ATXNV1`/`ATXNT` formats
+documented below.
+
+Build and flash over USB (a flaky cable or port can stop a transfer part way;
+the slower baud rate is reliable):
+
+    . esp-idf/export.sh && ./build.sh v300
+    idf.py -B build.v300 -p /dev/cu.usbmodem<N> -b 115200 flash
+
+Then check the boot log's heap line (see *BLE client notes*): both CAN tasks
+must report `created: 1`.
+
 # [WiCAN Documentation](https://meatpihq.github.io/wican-fw/) | [Firmware updates](https://github.com/L1Z3/wicant-i-precondition/releases/) | [Fluxer server](https://fluxer.gg/w0OpDJjG)
 
 # Building
