@@ -29,24 +29,49 @@ esp_err_t can_send(can_bus_t bus, twai_message_t *message, TickType_t ticks_to_w
     return 0;
 }
 
-typedef struct { unsigned char data[64]; int has; UBaseType_t size; } fake_queue_t;
+// Ring of `len` slots. The status/temperature queues are 1-deep and use
+// overwrite/peek; the remote-request queue is a real FIFO and uses send/receive.
+#define FAKE_QUEUE_SLOTS 8
+typedef struct {
+    unsigned char data[FAKE_QUEUE_SLOTS][64];
+    UBaseType_t size, len;
+    int count, head;
+} fake_queue_t;
 QueueHandle_t xQueueCreate(UBaseType_t len, UBaseType_t item_size) {
-    (void)len;
     fake_queue_t *q = calloc(1, sizeof(*q));
     q->size = item_size;
+    q->len = len < FAKE_QUEUE_SLOTS ? len : FAKE_QUEUE_SLOTS;
     return q;
 }
 BaseType_t xQueueOverwrite(QueueHandle_t qh, const void *item) {
     fake_queue_t *q = qh;
-    memcpy(q->data, item, q->size);
-    q->has = 1;
+    memcpy(q->data[0], item, q->size);
+    q->head = 0;
+    q->count = 1;
     return 1;
 }
 BaseType_t xQueuePeek(QueueHandle_t qh, void *item, TickType_t w) {
     (void)w;
     fake_queue_t *q = qh;
-    if (!q->has) return 0;
-    memcpy(item, q->data, q->size);
+    if (!q->count) return 0;
+    memcpy(item, q->data[q->head], q->size);
+    return 1;
+}
+BaseType_t xQueueSend(QueueHandle_t qh, const void *item, TickType_t w) {
+    (void)w;
+    fake_queue_t *q = qh;
+    if (q->count >= (int)q->len) return 0;
+    memcpy(q->data[(q->head + q->count) % (int)q->len], item, q->size);
+    q->count++;
+    return 1;
+}
+BaseType_t xQueueReceive(QueueHandle_t qh, void *item, TickType_t w) {
+    (void)w;
+    fake_queue_t *q = qh;
+    if (!q->count) return 0;
+    memcpy(item, q->data[q->head], q->size);
+    q->head = (q->head + 1) % (int)q->len;
+    q->count--;
     return 1;
 }
 
@@ -80,6 +105,31 @@ static void car_status(uint8_t b, can_bus_t bus) { uint8_t d[8] = {0}; d[1] = b;
 static void car_power(bool ready) { uint8_t d[8] = {0}; d[0] = ready ? 0x04 : 0x00; rx_frame(0x038, d, CAN_BUS_0); }
 
 static void tick1(void) { fake_now += 40000; precondition_tick(); }
+
+static void batt_temp(int8_t min_c, int8_t max_c) {
+    uint8_t d[8] = {0};
+    d[0] = (uint8_t)min_c;
+    d[1] = (uint8_t)max_c;
+    rx_frame(0x152, d, CAN_BUS_0);
+}
+
+// A remote request only queues work; the machine applies it on the next tick.
+static void remote(precon_remote_action_t action) {
+    precondition_request_remote(action);
+    tick1();
+}
+
+static precondition_status_t status_now(void) {
+    precondition_status_t s;
+    CHECK(precondition_get_status(&s));
+    return s;
+}
+
+static void expect_remote_state(uint8_t expected) {
+    precondition_status_t s = status_now();
+    CHECK_MSG(s.state == expected, "expected remote state %u, got %u",
+              (unsigned)expected, (unsigned)s.state);
+}
 static void advance_us(int64_t us) {
     int64_t end = fake_now + us;
     while (fake_now < end) tick1();
@@ -652,6 +702,101 @@ static void run_once_ignores_stored_latch(void) {
 // ---- suite table ----
 // each suite runs in its own forked process: the config caches, the repeating
 // latch, the fake NVS, and the platform discovery flags all live in statics
+// Remote activation (ELM327 ATXPC over BLE) alongside the button path.
+static void run_remote_trigger(void) {
+    precondition_init();
+    expect_state("idle");
+
+    // nothing published until the first tick has run
+    precondition_status_t s;
+    CHECK(!precondition_get_status(&s));
+    tick1();
+    s = status_now();
+    CHECK(s.state == PRECON_STATE_IDLE);
+    CHECK(s.car_status == PRECON_CAR_UNKNOWN);
+    CHECK(s.flags == 0);
+
+    // STOP with nothing running is a no-op, not a start
+    sent_count = 0;
+    remote(PRECON_REMOTE_STOP);
+    expect_state("idle");
+    CHECK(sent_count == 0);
+
+    // START runs the same burst the button does
+    remote(PRECON_REMOTE_START);
+    expect_state("start-burst");
+    expect_remote_state(PRECON_STATE_STARTING);
+
+    // a second START must not be read as "the other way" and stop the attempt
+    remote(PRECON_REMOTE_START);
+    CHECK(sm_in(&precon_sm, &S_REQUESTED));
+    CHECK(!sm_in(&precon_sm, &S_STOPPING));
+
+    advance_until_state("wait-starting", 1000000);
+    CHECK(sent_count == 6);
+    check_start_burst_msgs(0);
+    car_status(0x05, CAN_BUS_0);
+    expect_state("wait-started");
+    car_status(0x15, CAN_BUS_0);
+    expect_state("active");
+
+    car_power(true);
+    batt_temp(18, 24);
+    tick1();
+    s = status_now();
+    CHECK(s.state == PRECON_STATE_ACTIVE);
+    CHECK(s.car_status == PRECON_CAR_STARTED);
+    CHECK(s.seconds_remaining == 0);
+    CHECK(s.batt_min_c == 18 && s.batt_max_c == 24);
+    CHECK((s.flags & PRECON_FLAG_TEMP_VALID) != 0);
+    CHECK((s.flags & PRECON_FLAG_CAR_READY) != 0);
+    CHECK((s.flags & PRECON_FLAG_STATUS_FRAME) != 0);
+    CHECK((s.flags & PRECON_FLAG_BUTTON_HELD) == 0);
+
+    // STOP past the debounce window ends the session
+    fake_now += 2000000;
+    sent_count = 0;
+    remote(PRECON_REMOTE_STOP);
+    expect_state("stop-burst");
+    expect_remote_state(PRECON_STATE_STOPPING);
+    advance_us(240000);
+    check_stop_burst_msgs(0);
+    // the idle status frame ends the stop synchronously, from the rx hook. the
+    // snapshot is only republished on a tick, so it lags an rx-driven
+    // transition by up to one 40ms tick -- readers poll, they don't get an edge
+    car_status(0x01, CAN_BUS_0);
+    expect_state("idle");
+    expect_remote_state(PRECON_STATE_STOPPING);
+    tick1();
+    expect_remote_state(PRECON_STATE_IDLE);
+    CHECK(status_now().car_status == PRECON_CAR_IDLE);
+
+    // TOGGLE is the button's meaning: on from idle, off from a live request
+    remote(PRECON_REMOTE_TOGGLE);
+    expect_state("start-burst");
+    fake_now += 2000000;
+    remote(PRECON_REMOTE_TOGGLE);
+    CHECK(sm_in(&precon_sm, &S_STOPPING));
+
+    // the button still works while remote requests are in play
+    advance_until_state("idle", 60000000);
+    toggle();
+    expect_state("start-burst");
+    expect_remote_state(PRECON_STATE_IDLE);   // not republished until the next tick
+    tick1();
+    expect_remote_state(PRECON_STATE_STARTING);
+
+    // a full request queue drops the overflow rather than blocking, and the
+    // ones that did fit still apply (the machine's own debounce, not the queue,
+    // is what keeps the repeats from fighting each other)
+    fake_now += 2000000;
+    for (int i = 0; i < PRECONDITION_REMOTE_QUEUE_DEPTH + 2; i++) {
+        precondition_request_remote(PRECON_REMOTE_STOP);
+    }
+    tick1();
+    CHECK(sm_in(&precon_sm, &S_STOPPING));
+}
+
 // that latch on first use
 typedef struct {
     const char *name;
@@ -670,6 +815,7 @@ static const suite_t suites[] = {
     {"precondition persistent write retry", PERSISTENT, PRESS_SHORT, run_persistent_write_retry},
     {"precondition persistent write retry limit", PERSISTENT, PRESS_SHORT, run_persistent_write_retry_limit},
     {"precondition once ignores stored latch", ONCE, PRESS_SHORT, run_once_ignores_stored_latch},
+    {"precondition remote trigger", ONCE, PRESS_SHORT, run_remote_trigger},
 };
 #define NUM_SUITES (sizeof(suites) / sizeof(suites[0]))
 
