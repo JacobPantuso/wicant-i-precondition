@@ -518,9 +518,19 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
 
             if(profile_handle_table[IDX_CHAR_VAL_A] == param->write.handle)
             {
-				memcpy(rx_buffer.ucElement, param->write.value, param->write.len);
+				// Clamped: a write longer than the buffer used to overrun it and
+				// wedge command handling until reboot. The ELM327 parser joins
+				// split writes at the CR, so clients must send long commands in
+				// pieces of DEV_BUFFER_LENGTH bytes or fewer.
+				uint16_t len = param->write.len;
+				if (len > DEV_BUFFER_LENGTH)
+				{
+					ESP_LOGW(GATTS_TABLE_TAG, "BLE write of %u bytes truncated to %u", len, DEV_BUFFER_LENGTH);
+					len = DEV_BUFFER_LENGTH;
+				}
+				memcpy(rx_buffer.ucElement, param->write.value, len);
 				rx_buffer.dev_channel = DEV_BLE;
-				rx_buffer.usLen = param->write.len;
+				rx_buffer.usLen = len;
 				xQueueSend(*xBle_RX_Queue, ( void * ) &rx_buffer, portMAX_DELAY );
             }
             else if(profile_handle_table[IDX_CHAR_VAL_C] == param->write.handle)

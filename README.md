@@ -81,6 +81,26 @@ acknowledge a start.
 
 Due to this implementation, the firmware associated on this branch enables BLE by default. The AP is still accessible on initial startup after power cycling the device but sometimes the AP cannot be accessed.  
 
+### BLE client notes
+
+- **Keep each BLE write to 65 bytes or fewer.** The receive buffer is
+  `DEV_BUFFER_LENGTH` (65) bytes. A longer write is now truncated (and logged)
+  instead of overrunning the buffer, which used to wedge command handling until
+  reboot. The ELM327 parser joins writes until the terminating `\r`, so a long
+  command can be sent in pieces.
+- **The boot log reports heap headroom.** The ESP32-C3 heap is close to its
+  limit, and `xTaskCreate` fails silently when it runs out: at one point neither
+  CAN task started, so no ELM327 command was answered and the harness button did
+  nothing. Every boot now logs (at warning level, so it survives the runtime log
+  filter):
+
+      W app_main: heap before CAN tasks: free 15696, largest 7680, min ever 15604
+      W app_main: can_rx_task created: 1, can_tx_task created: 1, heap after: free 8880, largest 7680
+
+  Check that line after any change that adds a static buffer or a queue.
+- The Wi-Fi TCP reply queue is 32 slots, down from 128, to leave room for the
+  CAN tasks' stacks.
+
 ---
 ![Modes](https://user-images.githubusercontent.com/94690098/222961571-bd137341-808a-4f0a-9528-789fe24d640e.png "Connection Mode")
 ---

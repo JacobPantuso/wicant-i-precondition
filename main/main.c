@@ -55,6 +55,7 @@
 #include "hw_config.h"
 #include "dev_status.h"
 #include "precondition.h"
+#include "esp_heap_caps.h"
 #include "debug_logs.h"
 #include "debug_logs_config.h"
 
@@ -481,8 +482,11 @@ void app_main(void)
 #endif
 
     xMsg_Rx_Queue = xQueueCreate(16, sizeof( xdev_buffer) );
-    // 128 slots (~10 KB): bigger than upstream 16 in order to ride out wifi/lwip hiccups
-    xMsg_Tx_Queue = xQueueCreate(128, sizeof( xdev_buffer) );
+    // 32, not 128: this queue only carries replies to Wi-Fi TCP clients, and
+    // at 76 bytes a slot the extra depth cost the ~7 KB that can_rx_task and
+    // can_tx_task need -- with it, the heap ran out and both silently failed
+    // to start (no ELM327 replies, no preconditioning). Measured 2026-09-25.
+    xMsg_Tx_Queue = xQueueCreate(32, sizeof( xdev_buffer) );
     xmsg_ws_tx_queue = xQueueCreate(8, sizeof( xdev_buffer) );
 
 	esp_ota_mark_app_valid_cancel_rollback();
@@ -674,8 +678,19 @@ void app_main(void)
     // Prio 7: the CAN datapath must preempt the TCP streaming tasks (prio 5)
     // instead of timeslicing with them. Safe only because can_rx_task blocks
     // in can_receive() when idle (see the receive loop).
-    xTaskCreate(can_rx_task, "can_rx_task", 1024*3, (void*)AF_INET, 7, NULL);
-    xTaskCreate(can_tx_task, "can_tx_task", 1024*3, (void*)AF_INET, 5, NULL);
+    // The heap is near its limit on the C3, and xTaskCreate fails silently when
+    // it runs out: both CAN tasks once didn't start, so nothing answered ELM327
+    // and preconditioning was dead. Worth one line at every boot.
+    ESP_LOGW(TAG, "heap before CAN tasks: free %u, largest %u, min ever %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    BaseType_t rx_ok = xTaskCreate(can_rx_task, "can_rx_task", 1024*3, (void*)AF_INET, 7, NULL);
+    BaseType_t tx_ok = xTaskCreate(can_tx_task, "can_tx_task", 1024*3, (void*)AF_INET, 5, NULL);
+    ESP_LOGW(TAG, "can_rx_task created: %d, can_tx_task created: %d, heap after: free %u, largest %u",
+             (int)rx_ok, (int)tx_ok,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
 	if(config_server_get_sleep_config())
 	{
