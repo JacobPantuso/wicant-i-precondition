@@ -81,6 +81,43 @@ acknowledge a start.
 
 Due to this implementation, the firmware associated on this branch enables BLE by default. The AP is still accessible on initial startup after power cycling the device but sometimes the AP cannot be accessed.  
 
+### CAN sniffer over BLE (`ATXSN`)
+
+A second vendor command streams received CAN frames to the BLE client, for
+reverse-engineering traffic (the myIONIQ app records it while driving). It is
+receive-only: nothing is transmitted.
+
+| Command               | Effect                                                   | Reply |
+|-----------------------|----------------------------------------------------------|-------|
+| `ATXSN`               | query status                                             | `XSN:<on>,<npins>,<rx>,<sent>,<dropped>,<suppressed>,<ids>` |
+| `ATXSN0`              | stop                                                     | `OK`  |
+| `ATXSN1`              | start, change-only for every identifier                  | `OK`  |
+| `ATXSN1 63E,4CC,...`  | start, and pass every frame of the listed identifiers    | `OK`  |
+| `ATXSN1P 63E,4CC,...` | the listed identifiers only, nothing else                | `OK`  |
+
+While running, frames arrive as `'$'`-prefixed lines between ordinary ELM327
+responses, one per line, each ending in `\r`:
+
+    $0000 0001A2F3 63E 8 0322FF0000000000   line number, timestamp (low 32 bits of µs), id, DLC, data
+    $0001 ! 1532 211 0 1321 94              once a second: rx, sent, dropped, suppressed, ids
+
+Line numbers count the lines the firmware handed to BLE, from 0000 at each
+start; a gap on the receiving side means lines were lost in transit.
+
+A whole bus does not fit through BLE, so an unlisted identifier is only sent
+when its payload changes, at most 5 times a second. Listed ("pinned")
+identifiers bypass that, so multi-frame ISO-TP messages arrive intact. On a busy
+bus even the change-only stream saturates BLE (about 30% of lines were dropped
+on a drive), and one lost frame ruins a multi-frame message, so `ATXSN1P`
+streams the pinned identifiers alone. Lines are dropped rather than let them
+crowd out command replies, and the `dropped` counter says how many. The sniffer
+stops when BLE disconnects. The command is capped at 126 characters, which
+bounds the pin list (16 at most).
+
+The change-only table (512 slots, ~16 KB) is allocated when a session starts and
+freed when it stops, in 1 KB chunks: at boot the heap can't spare it, and a
+single 16 KB block is rarely free once the device is up.
+
 ### BLE client notes
 
 - **Keep each BLE write to 65 bytes or fewer.** The receive buffer is

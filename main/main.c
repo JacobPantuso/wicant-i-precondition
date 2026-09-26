@@ -55,6 +55,7 @@
 #include "hw_config.h"
 #include "dev_status.h"
 #include "precondition.h"
+#include "sniff.h"
 #include "esp_heap_caps.h"
 #include "debug_logs.h"
 #include "debug_logs_config.h"
@@ -232,6 +233,26 @@ static void can_tx_task(void *pvParameters)
 		}
 	}
 }
+// Sink for sniff.c: one line per BLE TX queue item, so a sniff line can never
+// land in the middle of an ELM327 response. Refuses once the queue is nearly
+// full, keeping room for command replies: the app's ATXPC poll has to get
+// through while a busy bus is streaming. can_rx_task is the only caller.
+#define SNIFF_BLE_QUEUE_RESERVE 10
+static bool sniff_ble_sink(const char *line, uint8_t len)
+{
+	static xdev_buffer sniff_buffer;
+
+	if (xmsg_ble_tx_queue == NULL || len > sizeof(sniff_buffer.ucElement)
+	    || uxQueueSpacesAvailable(xmsg_ble_tx_queue) <= SNIFF_BLE_QUEUE_RESERVE)
+	{
+		return false;
+	}
+	memcpy(sniff_buffer.ucElement, line, len);
+	sniff_buffer.usLen = len;
+	sniff_buffer.dev_channel = DEV_BLE;
+	return xQueueSend(xmsg_ble_tx_queue, &sniff_buffer, 0) == pdTRUE;
+}
+
 #define HEAP_CAPS   (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 #define PRECONDITION_TICK_PERIOD_US 40000
 
@@ -289,6 +310,7 @@ static void can_rx_task(void *pvParameters)
         if ((esp_timer_get_time() - precondition_tick_last) >= PRECONDITION_TICK_PERIOD_US) {
             precondition_tick_last = esp_timer_get_time();
             precondition_tick();
+            sniff_tick(precondition_tick_last, ble_connected());
         }
 
 		// Block up to 10 ms for the first frame (keeps the 40 ms precondition
@@ -305,6 +327,10 @@ static void can_rx_task(void *pvParameters)
             // the single-bus protocols (slcan/realdash/elm327/mqtt) see
             // CAN_BUS_0 traffic only.
             precondition_can_rx_hook(&rx_msg, rx_bus);
+            if (rx_bus == CAN_BUS_0 && ble_connected())
+            {
+                sniff_rx(&rx_msg, esp_timer_get_time());
+            }
             {
                 twai_message_t fwd_msg = rx_msg;
                 can_bus_t fwd_bus;
@@ -504,6 +530,7 @@ void app_main(void)
 	// must run after config_server_start: entering the initial state reads the
 	// precon mode from the config
 	precondition_init();
+	sniff_init(sniff_ble_sink);
 	slcan_init(&send_to_host);
 
 	int8_t can_datarate = config_server_get_can_rate();

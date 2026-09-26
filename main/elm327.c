@@ -38,6 +38,7 @@
 #include "sleep_mode.h"
 #include "elm327.h"
 #include "precondition.h"
+#include "sniff.h"
 
 #define TAG 		__func__
 
@@ -1075,6 +1076,49 @@ static char* elm327_precondition(const char* command_str)
 	return response;
 }
 
+/*
+ * ATXSN - CAN sniffer (see sniff.h). Also a vendor extension; see ATXPC above
+ * for why the "x" prefix is safe.
+ *
+ *   ATXSN               query -> XSN:<on>,<npins>,<rx>,<sent>,<dropped>,<suppressed>,<ids>
+ *   ATXSN0              stop
+ *   ATXSN1              start, change-only for every identifier
+ *   ATXSN1 63E,4CC,...  start, also passing every frame of the listed ones
+ *
+ * Frames stream as '$'-prefixed lines between ordinary responses, only while
+ * BLE is connected; a disconnect stops the sniffer. elm327_process_cmd caps a
+ * command at 126 characters, which bounds the pin list.
+ */
+static char* elm327_sniff(const char* command_str)
+{
+	static char response[80];
+	sniff_config_t cfg;
+
+	switch(sniff_parse_command(&command_str[3], &cfg))
+	{
+		case SNIFF_CMD_SET:
+			sniff_request(&cfg);
+			return (char*)ok_str;
+		case SNIFF_CMD_QUERY:
+			break;
+		default:
+			return NULL;	// answered with '?', as for ATXPC
+	}
+
+	sniff_status_t status;
+	sniff_get_status(&status);
+	snprintf(response, sizeof(response), "XSN:%u,%u,%lu,%lu,%lu,%lu,%u",
+			 (unsigned)status.enabled,
+			 (unsigned)status.npins,
+			 (unsigned long)status.rx_total,
+			 (unsigned long)status.sent,
+			 (unsigned long)status.dropped,
+			 (unsigned long)status.suppressed,
+			 (unsigned)status.ids);
+
+	return response;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1100,6 +1144,7 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"i", elm327_identify},//identify yourself
 											{"m", elm327_return_ok},//memory off or on
 											{"xpc", elm327_precondition},//battery preconditioning (see above)
+											{"xsn", elm327_sniff},//CAN sniffer (see above)
 
 											{NULL, NULL},
 									};

@@ -7,4 +7,5 @@ typedef struct {
     uint32_t identifier;
     uint8_t data_length_code;
     uint8_t data[8];
+    uint32_t extd;
 } twai_message_t;
