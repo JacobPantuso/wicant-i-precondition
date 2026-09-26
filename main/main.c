@@ -56,6 +56,7 @@
 #include "dev_status.h"
 #include "precondition.h"
 #include "sniff.h"
+#include "clusternav.h"
 #include "esp_heap_caps.h"
 #include "debug_logs.h"
 #include "debug_logs_config.h"
@@ -233,6 +234,7 @@ static void can_tx_task(void *pvParameters)
 		}
 	}
 }
+
 // Sink for sniff.c: one line per BLE TX queue item, so a sniff line can never
 // land in the middle of an ELM327 response. Refuses once the queue is nearly
 // full, keeping room for command replies: the app's ATXPC poll has to get
@@ -255,6 +257,29 @@ static bool sniff_ble_sink(const char *line, uint8_t len)
 
 #define HEAP_CAPS   (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 #define PRECONDITION_TICK_PERIOD_US 40000
+
+// Sink for clusternav.c's multi-frame messages (0x6E7, 0x6DF, 0x680, 0x681):
+// cluster side only, and never waits, so
+// a full TX pool just holds the frame until the next pass of the CAN loop.
+static bool clusternav_can_sink(const twai_message_t *msg)
+{
+	twai_message_t copy = *msg;
+	return can_send(CAN_BUS_0, &copy, 0) == ESP_OK;
+}
+
+// Every forward hook, in priority order. Preconditioning's countdown owns
+// 0x4E8/0x4CC while a start or stop is in flight, so cluster nav only gets
+// frames preconditioning left alone. Both only rewrite CAN_BUS_0-bound frames
+// (the cluster side), so the same call serves parallel and bridge mode.
+static fwd_result_t fwd_hooks(twai_message_t *msg, can_bus_t fwd_bus)
+{
+	fwd_result_t result = precondition_fwd_hook(msg, fwd_bus);
+	if (result == FWD_PASSTHROUGH && fwd_bus == CAN_BUS_0)
+	{
+		result = clusternav_fwd(msg, esp_timer_get_time());
+	}
+	return result;
+}
 
 static void can_rx_task(void *pvParameters)
 {
@@ -311,7 +336,10 @@ static void can_rx_task(void *pvParameters)
             precondition_tick_last = esp_timer_get_time();
             precondition_tick();
             sniff_tick(precondition_tick_last, ble_connected());
+            clusternav_tick(precondition_tick_last, ble_connected());
         }
+        // every pass, not the 40 ms tick: multi-frame messages go out ~5 ms apart
+        clusternav_poll(esp_timer_get_time());
 
 		// Block up to 10 ms for the first frame (keeps the 40 ms precondition
 		// tick and LED housekeeping above running when idle), then drain the
@@ -349,7 +377,7 @@ static void can_rx_task(void *pvParameters)
 					// or wedged: fall back to fast-drop for 100ms so a dead bus 1
 					// can't throttle RX servicing (and bus-0 GVRET streaming).
                     fwd_bus = (rx_bus == CAN_BUS_0) ? CAN_BUS_1 : CAN_BUS_0;
-                    fwd_result = precondition_fwd_hook(&fwd_msg, fwd_bus);
+                    fwd_result = fwd_hooks(&fwd_msg, fwd_bus);
                     fwd_wanted = (fwd_result != FWD_BLOCK);
                     fwd_wait =
                         (esp_timer_get_time() < fwd_fastdrop_until_us[fwd_bus]) ? 0 : 2;
@@ -358,10 +386,10 @@ static void can_rx_task(void *pvParameters)
                 {
                     // Parallel mode (and single-bus builds): no bridging; inject
                     // a modified duplicate alongside the original, on the bus it
-                    // arrived on. precondition_fwd_hook only modifies
+                    // arrived on. fwd_hooks only modify
                     // CAR_BUS-bound frames, so bus 1 traffic is left alone.
                     fwd_bus = rx_bus;
-                    fwd_result = precondition_fwd_hook(&fwd_msg, fwd_bus);
+                    fwd_result = fwd_hooks(&fwd_msg, fwd_bus);
                     fwd_wanted = (fwd_result == FWD_MODIFIED);
                     fwd_wait = 1;
                 }
@@ -531,6 +559,7 @@ void app_main(void)
 	// precon mode from the config
 	precondition_init();
 	sniff_init(sniff_ble_sink);
+	clusternav_init(clusternav_can_sink);
 	slcan_init(&send_to_host);
 
 	int8_t can_datarate = config_server_get_can_rate();

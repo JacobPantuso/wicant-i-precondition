@@ -111,12 +111,67 @@ bus even the change-only stream saturates BLE (about 30% of lines were dropped
 on a drive), and one lost frame ruins a multi-frame message, so `ATXSN1P`
 streams the pinned identifiers alone. Lines are dropped rather than let them
 crowd out command replies, and the `dropped` counter says how many. The sniffer
-stops when BLE disconnects. The command is capped at 126 characters, which
-bounds the pin list (16 at most).
+stops when BLE disconnects. The pin list holds 16 identifiers at most.
 
 The change-only table (512 slots, ~16 KB) is allocated when a session starts and
 freed when it stops, in 1 KB chunks: at boot the heap can't spare it, and a
 single 16 KB block is rarely free once the device is up.
+
+### Cluster and HUD turn-by-turn (`ATXNV`, `ATXNT`)
+
+Lets a phone app put its own navigation (the myIONIQ app uses it for CarPlay
+routes) on the instrument cluster and the head-up display. The head unit keeps
+broadcasting "no guidance" nav frames while CarPlay navigates; the firmware
+rewrites those on their way to the cluster, and sends the multi-frame text and
+lane messages the head unit leaves silent under CarPlay.
+
+**The firmware knows no frame layouts.** The app sends each frame's bytes and a
+mask of which to overwrite, so decoding more of the cluster is an app update,
+not a reflash.
+
+| Command              | Effect | Reply |
+|----------------------|--------|-------|
+| `ATXNV`              | query status | `XNV:<active>,<updates>,<injected>` |
+| `ATXNV0`             | stop, and forget every multi-frame message | `OK` |
+| `ATXNV1<frames>`     | set the frames to rewrite: 1–5 × 22 hex digits, each `<id:4><mask:2><d0..d7:16>` | `OK` |
+| `ATXNT`              | query status | `XNT:<messages>,<frames>` |
+| `ATXNT<id:4><hex>`   | set the ISO-TP message for that CAN id and SID, up to 96 bytes | `OK` |
+
+- **Frames `ATXNV1` may rewrite:** `4CC`, `63E`, `640`, `641`, `4E8`, `4EA`, and
+  nothing else. The hook sees every frame bound for the cluster side, powertrain
+  included, so a bad payload must not be able to rewrite one of those. A byte
+  whose mask bit is clear keeps the head unit's value.
+- **Messages `ATXNT` may originate:** text `F0` (next street), `F2` (HUD maneuver
+  list) and `F4` (destination) on both `6E7` (cluster) and `6DF` (HUD), and the
+  81-byte `F1` lane graphic on `680` and `681`. Frames are paced 5 ms apart with
+  `AA` padding and no flow control, as the head unit sends them. Each is
+  re-sent only when it changes.
+- **Safety:** injection stops 4 s after the last `ATXNV1`, and at once when BLE
+  disconnects, so a dropped link can't leave a frozen arrow. When it lapses,
+  every message the firmware drew is replaced with the head unit's blank form
+  (`SID 00 00`, or `F1` and 80 zeros), and `ATXNV0` or a disconnect forgets
+  them.
+- **Preconditioning wins:** its countdown display owns `4E8`/`4CC` while a start
+  or stop is in flight (`fwd_hooks()` in `main.c`).
+- **Single-bus vs MITM:** on the single-bus V300 the rewritten frame is sent
+  right after the head unit's own, so the cluster may flicker between them. On
+  a dual-bus board in bridge mode the same hook replaces the frame outright.
+- Commands can be up to 254 characters (the ELM327 command buffer is 256 bytes
+  on this branch). Send them in BLE writes of 65 bytes or fewer; see below.
+
+The layouts, all from IONIQ 6 captures of the built-in nav, live in the app
+(`ClusterNavFeed.swift`):
+
+| Frame | Layout |
+|-------|--------|
+| `4CC` | `0D 00 00 <arrow> <m LE> 00 00`: arrow = clockwise angle ÷ 7.5°. `46` follow road, `09` calculating, `0A` recalculating |
+| `63E` | `00 00 <m to turn LE> <m from the car to the turn after, LE> 00 00` |
+| `640` | head unit's idle bytes, `d7` = approach bar in % |
+| `4E8` | `<tenths<<4 \| unit> <ETA h> <ETA m> <arrow−1> <destination LE> 5<flag> 00` |
+| `6E7`/`6DF` `F2` | `F2 <n> <HUD arrow ×3, 00-padded> <street> 00 00 00 00`: HUD arrows `41` straight, `42` slight R, `43` R, `44` sharp R, `45` sharp L, `46` L, `47` slight L, `48`/`49` U-turn L/R, `70` destination |
+| `680`/`681` `F1` | `[1]` lane count, `[3+i]` lane colours (overlay<<2 \| underlay: 0 none, 1 white, 2 blue, 3 grey), `[19+3i]`/`[20+3i]` underlay/overlay arrow (`01` straight … `08` slight L) |
+
+Host tests: `test/host/test_clusternav.c`.
 
 ### BLE client notes
 

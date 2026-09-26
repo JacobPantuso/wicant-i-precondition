@@ -39,6 +39,7 @@
 #include "elm327.h"
 #include "precondition.h"
 #include "sniff.h"
+#include "clusternav.h"
 
 #define TAG 		__func__
 
@@ -1087,7 +1088,7 @@ static char* elm327_precondition(const char* command_str)
  *
  * Frames stream as '$'-prefixed lines between ordinary responses, only while
  * BLE is connected; a disconnect stops the sniffer. elm327_process_cmd caps a
- * command at 126 characters, which bounds the pin list.
+ * command at 254 characters, which bounds the pin list.
  */
 static char* elm327_sniff(const char* command_str)
 {
@@ -1119,6 +1120,80 @@ static char* elm327_sniff(const char* command_str)
 	return response;
 }
 
+/*
+ * ATXNV - cluster turn-by-turn (see clusternav.h). Also a vendor extension;
+ * see ATXPC above for why the "x" prefix is safe.
+ *
+ *   ATXNV               query -> XNV:<active>,<updates>,<injected>
+ *   ATXNV0              clear
+ *   ATXNV1<22 hex/frame> set the frames to rewrite (layout in clusternav.h)
+ *
+ * The app resends at least every 1.5 s while navigating; injection lapses
+ * CLUSTERNAV_STALE_US after the last one, and immediately on BLE disconnect.
+ */
+static char* elm327_cluster_nav(const char* command_str)
+{
+	static char response[48];
+	clusternav_state_t state;
+
+	switch(clusternav_parse_command(&command_str[3], &state))
+	{
+		case CLUSTERNAV_CMD_SET:
+			clusternav_request(&state);
+			return (char*)ok_str;
+		case CLUSTERNAV_CMD_CLEAR:
+			clusternav_request(NULL);
+			return (char*)ok_str;
+		case CLUSTERNAV_CMD_QUERY:
+			break;
+		default:
+			return NULL;	// answered with '?', as for ATXPC
+	}
+
+	clusternav_status_t status;
+	clusternav_get_status(&status);
+	snprintf(response, sizeof(response), "XNV:%u,%lu,%lu",
+			 (unsigned)status.active,
+			 (unsigned long)status.updates,
+			 (unsigned long)status.injected);
+
+	return response;
+}
+
+/*
+ * ATXNT - cluster text on 0x6E7 (see clusternav.h). The payload is the whole
+ * ISO-TP message, SID first, as hex; the firmware only frames and paces it.
+ *
+ *   ATXNT               query -> XNT:<messages>,<frames>
+ *   ATXNT<id><hex>      set the message for that CAN id and SID (see clusternav.h)
+ *
+ * Text only reaches the cluster while ATXNV1 is live; when that lapses each
+ * field it drew is blanked, and ATXNV0 or a disconnect forgets it.
+ */
+static char* elm327_cluster_text(const char* command_str)
+{
+	static char response[40];
+	clusternav_text_t text;
+
+	switch(clusternav_parse_text(&command_str[3], &text))
+	{
+		case CLUSTERNAV_CMD_SET:
+			return clusternav_request_text(&text) ? (char*)ok_str : NULL;
+		case CLUSTERNAV_CMD_QUERY:
+			break;
+		default:
+			return NULL;	// answered with '?', as for ATXPC
+	}
+
+	clusternav_status_t status;
+	clusternav_get_status(&status);
+	snprintf(response, sizeof(response), "XNT:%lu,%lu",
+			 (unsigned long)status.texts_sent,
+			 (unsigned long)status.text_frames);
+
+	return response;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1145,6 +1220,8 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"m", elm327_return_ok},//memory off or on
 											{"xpc", elm327_precondition},//battery preconditioning (see above)
 											{"xsn", elm327_sniff},//CAN sniffer (see above)
+											{"xnv", elm327_cluster_nav},//cluster turn-by-turn (see above)
+											{"xnt", elm327_cluster_text},//cluster text (see above)
 
 											{NULL, NULL},
 									};
@@ -1163,14 +1240,14 @@ int8_t elm327_process_cmd(uint8_t *buf, uint8_t len, twai_message_t *frame, Queu
 	// Because the cmd_buffer and cmd_len are static they keep their value
 	// across multiple calls. So if a buf is an incomplete command the next
 	// call will keep add to the cmd_buffer until the ending CR is found.
-	static char cmd_buffer[128];
+	static char cmd_buffer[256];
 	static uint8_t cmd_len = 0;
 	static char cmd_response[128];
 	uint8_t cmd_found_flag = 0;
 
 	for(int i = 0; i < len; i++)
 	{
-		if(buf[i] == '\r' || cmd_len > 126)
+		if(buf[i] == '\r' || cmd_len > 254)
 		{
 	//		ESP_LOGI(TAG, "end of command i: %d, cmd_len: %u", i, cmd_len);
 			cmd_buffer[cmd_len] = 0;
