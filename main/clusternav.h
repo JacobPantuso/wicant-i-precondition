@@ -71,6 +71,7 @@ typedef struct {
     uint32_t injected;     // frames modified
     uint32_t texts_sent;   // 0x6E7 messages completed
     uint32_t text_frames;  // 0x6E7 frames sent
+    uint32_t text_resends; // messages re-sent after the head unit blanked its own
 } clusternav_status_t;
 
 typedef enum {

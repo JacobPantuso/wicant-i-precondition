@@ -33,7 +33,7 @@ static bool has_state = false;
 static int64_t updated_us = 0;
 // read by clusternav_get_status from any task
 static volatile bool live = false;
-static volatile uint32_t updates, injected, texts_sent, text_frames;
+static volatile uint32_t updates, injected, texts_sent, text_frames, text_resends;
 
 // ---- text slots (CAN task only) ----
 
@@ -383,11 +383,45 @@ void clusternav_poll(int64_t now_us)
     }
 }
 
+// ISO-TP from the head unit on one of the text slots. Under CarPlay it still
+// draws its own lane graphic near an interchange, once, then blanks it once
+// past. `shown` only tracks what this code sent (TWAI never receives its own
+// frames), so it went on believing the app's lanes were up and the HUD stayed
+// blank until they changed. Its lanes are left alone; the app's go back the
+// moment it blanks them. The first frame says which: text blanks as a single
+// frame "SID 00 00", F1 as a first frame with a lane count of 0.
+static void note_foreign_text(const twai_message_t *msg)
+{
+    const uint8_t pci = msg->data[0] >> 4;
+    uint8_t sid;
+    bool blank;
+    if (pci == 0U) {
+        sid = msg->data[1];
+        blank = (msg->data[0] & 0x0FU) == 3U && msg->data[2] == 0U && msg->data[3] == 0U;
+    } else if (pci == 1U) {
+        sid = msg->data[2];
+        blank = (sid == 0xF1U) && msg->data[3] == 0U;
+    } else {
+        return;
+    }
+    const int slot = slot_for((uint16_t)msg->identifier, sid);
+    if (slot < 0 || !blank || wanted[slot].len == 0U) {
+        return;
+    }
+    if (tx.active && tx.slot == (uint8_t)slot) {
+        return;   // ours is already on its way out
+    }
+    // anything but the wanted payload's own fingerprint makes poll resend it
+    shown[slot] = ~fingerprint(&wanted[slot]);
+    text_resends++;
+}
+
 fwd_result_t clusternav_fwd(twai_message_t *to_send, int64_t now_us)
 {
     if (!is_live(now_us) || to_send->extd || to_send->data_length_code < 8U) {
         return FWD_PASSTHROUGH;
     }
+    note_foreign_text(to_send);
     for (uint8_t i = 0; i < current.count; i++) {
         const clusternav_frame_t *f = &current.frames[i];
         if (f->id != to_send->identifier || f->mask == 0U) {
@@ -411,4 +445,5 @@ void clusternav_get_status(clusternav_status_t *out)
     out->injected = injected;
     out->texts_sent = texts_sent;
     out->text_frames = text_frames;
+    out->text_resends = text_resends;
 }
