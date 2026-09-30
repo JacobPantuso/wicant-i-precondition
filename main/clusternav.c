@@ -65,6 +65,26 @@ static struct {
 } tx;
 static int64_t last_frame_us = -CLUSTERNAV_TEXT_GAP_US;
 
+// when the head unit last sent any frame on each text id
+static const uint16_t text_ids[] = {0x6E7U, 0x6DFU, 0x680U, 0x681U};
+static int64_t foreign_us[sizeof(text_ids) / sizeof(text_ids[0])];
+
+static int foreign_index(uint16_t id)
+{
+    for (int k = 0; k < (int)(sizeof(text_ids) / sizeof(text_ids[0])); k++) {
+        if (text_ids[k] == id) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+static bool foreign_quiet(uint16_t id, int64_t now_us)
+{
+    const int k = foreign_index(id);
+    return k < 0 || (now_us - foreign_us[k]) >= CLUSTERNAV_FOREIGN_QUIET_US;
+}
+
 static int hex_nibble(char c)
 {
     if (c >= '0' && c <= '9') {
@@ -329,7 +349,7 @@ void clusternav_poll(int64_t now_us)
         for (int i = 0; i < CLUSTERNAV_TEXT_SLOTS; i++) {
             clusternav_text_t want;
             target_text(i, now_live, &want);
-            if (fingerprint(&want) != shown[i]) {
+            if (fingerprint(&want) != shown[i] && foreign_quiet(want.id, now_us)) {
                 tx.active = true;
                 tx.slot = (uint8_t)i;
                 tx.offset = 0;
@@ -383,15 +403,30 @@ void clusternav_poll(int64_t now_us)
     }
 }
 
-// ISO-TP from the head unit on one of the text slots. Under CarPlay it still
-// draws its own lane graphic near an interchange, once, then blanks it once
-// past. `shown` only tracks what this code sent (TWAI never receives its own
-// frames), so it went on believing the app's lanes were up and the HUD stayed
-// blank until they changed. Its lanes are left alone; the app's go back the
-// moment it blanks them. The first frame says which: text blanks as a single
-// frame "SID 00 00", F1 as a first frame with a lane count of 0.
-static void note_foreign_text(const twai_message_t *msg)
+// ISO-TP from the head unit on one of the text ids. Under CarPlay it still
+// draws its own HUD lane graphic near a junction, and blanks it once past.
+// `shown` only tracks what this code sent (TWAI never receives its own
+// frames), so the head unit's messages are accounted for here:
+//  - Any frame of its own cuts off a message of ours on the same id. The HUD
+//    drops both when two multi-frame messages interleave, so ours is dropped
+//    and resent whole once the head unit has gone quiet (clusternav_poll).
+//    Starting ours on its first frame broke its blank, which left its lanes
+//    stuck on the HUD past the junction (29drive, 2026-09-29).
+//  - Over lanes or text of ours, its message is replaced with ours.
+//  - Over a blank of ours, its lanes stay up, and its blank already matches.
+// The first frame says which: text blanks as a single frame "SID 00 00",
+// F1 as a first frame with a lane count of 0.
+static void note_foreign_text(const twai_message_t *msg, int64_t now_us)
 {
+    const int k = foreign_index((uint16_t)msg->identifier);
+    if (k < 0) {
+        return;
+    }
+    foreign_us[k] = now_us;
+    if (tx.active && tx.msg.id == msg->identifier) {
+        tx.active = false;   // `shown` keeps its old value, so poll resends it
+    }
+
     const uint8_t pci = msg->data[0] >> 4;
     uint8_t sid;
     bool blank;
@@ -405,11 +440,17 @@ static void note_foreign_text(const twai_message_t *msg)
         return;
     }
     const int slot = slot_for((uint16_t)msg->identifier, sid);
-    if (slot < 0 || !blank || wanted[slot].len == 0U) {
+    if (slot < 0 || !is_live(now_us) || wanted[slot].len == 0U) {
         return;
     }
-    if (tx.active && tx.slot == (uint8_t)slot) {
-        return;   // ours is already on its way out
+    clusternav_text_t blank_msg;
+    blank_form(&blank_msg, slot);
+    const uint32_t blank_print = fingerprint(&blank_msg);
+    if (fingerprint(&wanted[slot]) == blank_print) {
+        if (blank) {
+            shown[slot] = blank_print;
+        }
+        return;
     }
     // anything but the wanted payload's own fingerprint makes poll resend it
     shown[slot] = ~fingerprint(&wanted[slot]);
@@ -418,10 +459,13 @@ static void note_foreign_text(const twai_message_t *msg)
 
 fwd_result_t clusternav_fwd(twai_message_t *to_send, int64_t now_us)
 {
-    if (!is_live(now_us) || to_send->extd || to_send->data_length_code < 8U) {
+    if (to_send->extd || to_send->data_length_code < 8U) {
         return FWD_PASSTHROUGH;
     }
-    note_foreign_text(to_send);
+    note_foreign_text(to_send, now_us);
+    if (!is_live(now_us)) {
+        return FWD_PASSTHROUGH;
+    }
     for (uint8_t i = 0; i < current.count; i++) {
         const clusternav_frame_t *f = &current.frames[i];
         if (f->id != to_send->identifier || f->mask == 0U) {

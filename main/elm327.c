@@ -1164,7 +1164,7 @@ static char* elm327_cluster_nav(const char* command_str)
  * ATXNT - cluster text on 0x6E7 (see clusternav.h). The payload is the whole
  * ISO-TP message, SID first, as hex; the firmware only frames and paces it.
  *
- *   ATXNT               query -> XNT:<messages>,<frames>,<resends after a head-unit blank>
+ *   ATXNT               query -> XNT:<messages>,<frames>,<resends after the head unit wrote over ours>
  *   ATXNT<id><hex>      set the message for that CAN id and SID (see clusternav.h)
  *
  * Text only reaches the cluster while ATXNV1 is live; when that lapses each

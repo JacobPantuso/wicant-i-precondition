@@ -35,6 +35,9 @@
 #define CLUSTERNAV_TEXT_MAX     96       // bytes; F1 needs 81. Hex must fit ELM327's 254-char command cap
 #define CLUSTERNAV_TEXT_GAP_US  5000
 #define CLUSTERNAV_TEXT_SLOTS   8        // 6E7 and 6DF: F0, F2, F4; 680 and 681: F1
+// head-unit traffic on a text id holds off our next message on that id this
+// long, so the two never interleave (its F1 is 12 frames ~4.5 ms apart)
+#define CLUSTERNAV_FOREIGN_QUIET_US 20000
 
 // One frame to rewrite: every d[i] whose mask bit i is set is replaced; the
 // others keep the head unit's value.
