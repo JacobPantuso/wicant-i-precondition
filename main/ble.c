@@ -443,7 +443,10 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         ESP_LOGI(GATTS_TABLE_TAG, "address type = %d", param->ble_security.auth_cmpl.addr_type);
         ESP_LOGI(GATTS_TABLE_TAG, "pair status = %s",param->ble_security.auth_cmpl.success ? "success" : "fail");
         if(!param->ble_security.auth_cmpl.success) {
-            ESP_LOGI(GATTS_TABLE_TAG, "fail reason = 0x%x",param->ble_security.auth_cmpl.fail_reason);
+            // WARN, not INFO: runtime logging is WARN-only, and a failure here
+            // means Bluedroid has just deleted this peer's bond.
+            ESP_LOGW(GATTS_TABLE_TAG, "pairing failed, reason 0x%x -- bond removed",
+                     param->ble_security.auth_cmpl.fail_reason);
         } else {
             ESP_LOGI(GATTS_TABLE_TAG, "auth mode = %s",esp_auth_req_to_str(param->ble_security.auth_cmpl.auth_mode));
         }
@@ -582,8 +585,14 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     	    is_connected = true;
     	    xEventGroupSetBits(s_ble_event_group, BLE_CONNECTED_BIT);
     	    gpio_set_level(conn_led, LED_ON);
-            /* start security connect with peer device when receive the connect event sent by the master */
-            esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+            // No esp_ble_set_encryption() here. It started an SMP procedure on
+            // every connect, and Bluedroid deletes the stored bond whenever one
+            // ends unsuccessfully -- a link dropped mid-handshake is enough
+            // (bta_dm_act.c BTM_LE_COMPLT_EVT, btc_dm.c default case). The phone
+            // kept its key, so every later connect failed with "Peer removed
+            // pairing information" until it was forgotten on both sides. The
+            // characteristics are *_ENCRYPTED, so a bonded central encrypts with
+            // its own key on first access, which never touches that path.
             break;
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_DISCONNECT_EVT, disconnect reason 0x%x", param->disconnect.reason);
