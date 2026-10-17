@@ -57,6 +57,7 @@
 #include "precondition.h"
 #include "sniff.h"
 #include "clusternav.h"
+#include "bodycmd.h"
 #include "esp_heap_caps.h"
 #include "debug_logs.h"
 #include "debug_logs_config.h"
@@ -337,6 +338,7 @@ static void can_rx_task(void *pvParameters)
             precondition_tick();
             sniff_tick(precondition_tick_last, ble_connected());
             clusternav_tick(precondition_tick_last, ble_connected());
+            bodycmd_tick(ble_connected());
         }
         // every pass, not the 40 ms tick: multi-frame messages go out ~5 ms apart
         clusternav_poll(esp_timer_get_time());
@@ -687,7 +689,11 @@ void app_main(void)
 		port = 3333;
 	}
 
-	if(protocol != AUTO_PID)
+	// With BLE on, the first BLE connection turns Wi-Fi off for good (ble.c,
+	// CONNECT_EVT), so the TCP/UDP server's three 4 KB stacks would sit idle
+	// from then on; the myIONIQ app only talks BLE. tcp_port_open() is
+	// NULL-safe, so callers just see the port closed.
+	if(protocol != AUTO_PID && !config_server_get_ble_config())
 	{
 		if(config_server_get_port_type() == UDP_PORT)
 		{
@@ -702,7 +708,9 @@ void app_main(void)
     if(config_server_get_ble_config())
     {
     	int pass = config_server_ble_pass();
-    	xmsg_ble_tx_queue = xQueueCreate(100, sizeof( xdev_buffer) );
+    	// 64 x 76 B: the sniffer's pinned streams peak far below this, and
+    	// every slot is heap the CAN tasks need (see the boot heap line).
+    	xmsg_ble_tx_queue = xQueueCreate(64, sizeof( xdev_buffer) );
     	ble_init(&xmsg_ble_tx_queue, &xMsg_Rx_Queue, CONNECTED_LED_GPIO_NUM, pass, &ble_uid[0]);
     }
 

@@ -207,7 +207,12 @@ static void apply(const sniff_config_t *cfg, int64_t now_us)
         stop();
         return;
     }
-    if (!reset_table()) {
+    // A pinned-only session never reads the table (sniff_rx returns before
+    // slot_for), so it doesn't hold 16 KB for one. The Climate screen's seat
+    // watch runs this way.
+    if (cfg->pins_only) {
+        free_table();
+    } else if (!reset_table()) {
         enabled = false;   // no memory: the status query shows it off
         return;
     }

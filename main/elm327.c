@@ -40,6 +40,7 @@
 #include "precondition.h"
 #include "sniff.h"
 #include "clusternav.h"
+#include "bodycmd.h"
 
 #define TAG 		__func__
 
@@ -1195,6 +1196,77 @@ static char* elm327_cluster_text(const char* command_str)
 	return response;
 }
 
+/*
+ * ATXST - seat heat and ventilation (see bodycmd.c). Also a vendor extension;
+ * see ATXPC above for why the "x" prefix is safe.
+ *
+ *   ATXST        query -> XST:<seat requests>,<frames>,<busy>
+ *   ATXSTabcd    a driver, b passenger, c rear left, d rear right:
+ *                2 off, 3-5 ventilation, 6-8 heat, F unchanged (rear 2/6/8/F)
+ *
+ * The firmware builds the whole frame, so nothing the app sends reaches the
+ * lock bytes of 0x4A2.
+ */
+static char* elm327_seat_climate(const char* command_str)
+{
+	static char response[40];
+	uint16_t levels;
+
+	switch(bodycmd_parse_seat(&command_str[3], &levels))
+	{
+		case BODYCMD_CMD_SET:
+			bodycmd_request_seats(levels);
+			return (char*)ok_str;
+		case BODYCMD_CMD_QUERY:
+			break;
+		default:
+			return NULL;	// answered with '?', as for ATXPC
+	}
+
+	bodycmd_status_t status;
+	bodycmd_get_status(&status);
+	snprintf(response, sizeof(response), "XST:%lu,%lu,%u",
+			 (unsigned long)status.seat_requests,
+			 (unsigned long)status.frames,
+			 (unsigned)status.busy);
+
+	return response;
+}
+
+/*
+ * ATXLK - door lock (see bodycmd.c). Also a vendor extension; see ATXPC above
+ * for why the "x" prefix is safe.
+ *
+ *   ATXLK        query -> XLK:<lock requests>,<frames>,<busy>
+ *   ATXLK1       lock
+ *
+ * Lock only: there is no unlock command, by design.
+ */
+static char* elm327_door_lock(const char* command_str)
+{
+	static char response[40];
+
+	switch(bodycmd_parse_lock(&command_str[3]))
+	{
+		case BODYCMD_CMD_SET:
+			bodycmd_request_lock();
+			return (char*)ok_str;
+		case BODYCMD_CMD_QUERY:
+			break;
+		default:
+			return NULL;	// answered with '?', as for ATXPC
+	}
+
+	bodycmd_status_t status;
+	bodycmd_get_status(&status);
+	snprintf(response, sizeof(response), "XLK:%lu,%lu,%u",
+			 (unsigned long)status.lock_requests,
+			 (unsigned long)status.frames,
+			 (unsigned)status.busy);
+
+	return response;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1223,6 +1295,8 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xsn", elm327_sniff},//CAN sniffer (see above)
 											{"xnv", elm327_cluster_nav},//cluster turn-by-turn (see above)
 											{"xnt", elm327_cluster_text},//cluster text (see above)
+											{"xst", elm327_seat_climate},//seat heat and ventilation (see above)
+											{"xlk", elm327_door_lock},//door lock, no unlock (see above)
 
 											{NULL, NULL},
 									};
