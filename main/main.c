@@ -29,6 +29,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdio.h>
 #include "esp_timer.h"
 #include "comm_server.h"
 #include "lwip/sockets.h"
@@ -256,6 +257,52 @@ static bool sniff_ble_sink(const char *line, uint8_t len)
 	return xQueueSend(xmsg_ble_tx_queue, &sniff_buffer, 0) == pdTRUE;
 }
 
+// Pushes the preconditioning status to the app the moment it changes, in the
+// ATXPC reply's own format behind the '$' that marks an unsolicited line, so a
+// session started or stopped from the car's own button shows up at once
+// instead of at the app's next 30 s poll. The first tick of each BLE connection
+// sends the current state. can_rx_task only.
+static void precondition_push_status(bool link_up)
+{
+	static precondition_status_t last;
+	static bool sent = false;
+	precondition_status_t now;
+
+	if (!link_up)
+	{
+		sent = false;
+		return;
+	}
+	if (!precondition_get_status(&now))
+	{
+		return;
+	}
+	// Field by field: the struct has padding, which memcmp would compare too.
+	if (sent && now.state == last.state && now.car_status == last.car_status
+	    && now.seconds_remaining == last.seconds_remaining
+	    && now.batt_min_c == last.batt_min_c && now.batt_max_c == last.batt_max_c
+	    && now.flags == last.flags)
+	{
+		return;
+	}
+
+	char line[48];
+	int len = snprintf(line, sizeof(line), "$XPC:%u,%u,%u,%d,%d,%u\r",
+	                   (unsigned)now.state, (unsigned)now.car_status,
+	                   (unsigned)now.seconds_remaining, (int)now.batt_min_c,
+	                   (int)now.batt_max_c, (unsigned)now.flags);
+	if (len <= 0 || len >= (int)sizeof(line))
+	{
+		return;
+	}
+	// Remembered only once it's queued, so a full queue retries next tick.
+	if (sniff_ble_sink(line, (uint8_t)len))
+	{
+		last = now;
+		sent = true;
+	}
+}
+
 #define HEAP_CAPS   (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 #define PRECONDITION_TICK_PERIOD_US 40000
 
@@ -336,6 +383,7 @@ static void can_rx_task(void *pvParameters)
         if ((esp_timer_get_time() - precondition_tick_last) >= PRECONDITION_TICK_PERIOD_US) {
             precondition_tick_last = esp_timer_get_time();
             precondition_tick();
+            precondition_push_status(ble_connected());
             sniff_tick(precondition_tick_last, ble_connected());
             clusternav_tick(precondition_tick_last, ble_connected());
             bodycmd_tick(ble_connected());
