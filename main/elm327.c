@@ -41,6 +41,7 @@
 #include "sniff.h"
 #include "clusternav.h"
 #include "bodycmd.h"
+#include "config_server.h"
 
 #define TAG 		__func__
 
@@ -1267,6 +1268,43 @@ static char* elm327_door_lock(const char* command_str)
 	return response;
 }
 
+/*
+ * ATXPS - the car-shortcut setup (see config_server.c). Also a vendor
+ * extension; see ATXPC above for why the "x" prefix is safe.
+ *
+ *   ATXPS                       query -> XPS:<mode>,<button>,<press>
+ *   ATXPS<mode>,<button>,<press> set, then restart (e.g. ATXPSonce,sw_star,long)
+ *
+ * Values are the web page's: mode once/continuous/persistent, button sw_star,
+ * avn_star, ... or disabled, press short/long. Anything else answers '?'.
+ */
+static char* elm327_precon_setup(const char* command_str)
+{
+	static char response[80];
+	const char *args = &command_str[3];
+
+	if (args[0] == 0)
+	{
+		char mode[16], button[32], press[16];
+		config_server_get_precon_setup(mode, sizeof(mode), button, sizeof(button), press, sizeof(press));
+		snprintf(response, sizeof(response), "XPS:%s,%s,%s", mode, button, press);
+		return response;
+	}
+
+	char copy[80];
+	if (strlen(args) >= sizeof(copy)) return NULL;
+	strcpy(copy, args);
+	char *mode = copy;
+	char *button = strchr(mode, ',');
+	if (button == NULL) return NULL;
+	*button++ = 0;
+	char *press = strchr(button, ',');
+	if (press == NULL) return NULL;
+	*press++ = 0;
+
+	return config_server_set_precon_setup(mode, button, press) ? (char*)ok_str : NULL;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1297,6 +1335,7 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xnt", elm327_cluster_text},//cluster text (see above)
 											{"xst", elm327_seat_climate},//seat heat and ventilation (see above)
 											{"xlk", elm327_door_lock},//door lock, no unlock (see above)
+											{"xps", elm327_precon_setup},//car-shortcut setup (see above)
 
 											{NULL, NULL},
 									};

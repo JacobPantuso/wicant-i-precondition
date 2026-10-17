@@ -23,6 +23,7 @@
 #pragma once
 #include "esp_tls_crypto.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <esp_http_server.h>
 
 #define AP_MODE				0
@@ -208,3 +209,9 @@ char *config_server_get_status_json(bool remove_sensitive_info);
 int8_t config_server_precon_button(void);
 int8_t config_server_precon_mode(void);
 int8_t config_server_precon_press(void);
+// The car-shortcut setup (preconditioning mode, activation button, press
+// length) as the web page stores it, for ATXPS. See config_server.c.
+void config_server_get_precon_setup(char *mode, size_t mode_len,
+                                    char *button, size_t button_len,
+                                    char *press, size_t press_len);
+bool config_server_set_precon_setup(const char *mode, const char *button, const char *press);

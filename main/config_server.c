@@ -3064,6 +3064,111 @@ int8_t config_server_precon_mode(void)
 	return ONCE;
 }
 
+// ATXPS: the car-shortcut setup, so the myIONIQ app can change it over BLE
+// instead of the web page. Only the values config_server_precon_mode/button/
+// press recognise are accepted.
+static const char *const precon_modes[] = { "once", "continuous", "persistent", NULL };
+static const char *const precon_buttons[] = {
+	"disabled", "sw_star", "avn_star", "avn_tuner_in", "avn_vol_in", "sw_mode", "sw_speak",
+	"sw_call", "sw_vol_in", "sw_vol_up", "sw_vol_down", "sw_skip_up", "sw_skip_down",
+	"sw_ok", "avn_map", "avn_nav", "avn_media", "avn_tuner_up", "avn_tuner_down", NULL
+};
+static const char *const precon_presses[] = { "short", "long", NULL };
+
+static bool precon_value_allowed(const char *value, const char *const *allowed)
+{
+	for (int i = 0; allowed[i] != NULL; i++)
+	{
+		if (strcmp(value, allowed[i]) == 0) return true;
+	}
+	return false;
+}
+
+void config_server_get_precon_setup(char *mode, size_t mode_len,
+                                    char *button, size_t button_len,
+                                    char *press, size_t press_len)
+{
+	snprintf(mode, mode_len, "%s", device_config.precon_mode);
+	snprintf(button, button_len, "%s", device_config.precon_button);
+	snprintf(press, press_len, "%s", device_config.precon_press);
+}
+
+static void precon_restart_cb(void *arg)
+{
+	esp_restart();
+}
+
+// Rewrites the three keys in config.json, leaving every other setting as it
+// is, then restarts half a second later (time for the OK to reach the app):
+// precondition.c caches the button and press for the life of the process, the
+// same reason the web page's save restarts.
+bool config_server_set_precon_setup(const char *mode, const char *button, const char *press)
+{
+	if (!precon_value_allowed(mode, precon_modes) || !precon_value_allowed(button, precon_buttons)
+	    || !precon_value_allowed(press, precon_presses))
+	{
+		return false;
+	}
+
+	FILE *f = fopen(FS_MOUNT_POINT"/config.json", "r");
+	if (f == NULL) return false;
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (size <= 0 || size > 16384) { fclose(f); return false; }
+	char *text = malloc((size_t)size + 1);
+	if (text == NULL) { fclose(f); return false; }
+	size_t read = fread(text, 1, (size_t)size, f);
+	fclose(f);
+	text[read] = 0;
+
+	cJSON *root = cJSON_Parse(text);
+	free(text);
+	if (root == NULL) return false;
+
+	const char *keys[] = { "precon_mode", "precon_button", "precon_press" };
+	const char *values[] = { mode, button, press };
+	for (int i = 0; i < 3; i++)
+	{
+		cJSON *value = cJSON_CreateString(values[i]);
+		if (value == NULL) { cJSON_Delete(root); return false; }
+		if (cJSON_GetObjectItem(root, keys[i]) != NULL)
+		{
+			cJSON_ReplaceItemInObject(root, keys[i], value);
+		}
+		else
+		{
+			cJSON_AddItemToObject(root, keys[i], value);
+		}
+	}
+
+	char *json = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (json == NULL) return false;
+
+	f = fopen(FS_MOUNT_POINT"/config.json", "w");
+	if (f == NULL) { free(json); return false; }
+	size_t length = strlen(json);
+	size_t written = fwrite(json, 1, length, f);
+	fclose(f);
+	free(json);
+	if (written != length) return false;
+
+	snprintf(device_config.precon_mode, sizeof(device_config.precon_mode), "%s", mode);
+	snprintf(device_config.precon_button, sizeof(device_config.precon_button), "%s", button);
+	snprintf(device_config.precon_press, sizeof(device_config.precon_press), "%s", press);
+	ESP_LOGW(TAG, "car shortcut set over BLE: %s, %s, %s; restarting", mode, button, press);
+
+	static esp_timer_handle_t restart_timer = NULL;
+	if (restart_timer == NULL)
+	{
+		const esp_timer_create_args_t args = { .callback = precon_restart_cb, .name = "precon_restart" };
+		if (esp_timer_create(&args, &restart_timer) != ESP_OK) { esp_restart(); }
+	}
+	esp_timer_start_once(restart_timer, 500 * 1000);
+	return true;
+}
+
 int8_t config_server_precon_press(void)
 {
 	if(strcmp(device_config.precon_press, "long") == 0)
