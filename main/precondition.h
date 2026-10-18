@@ -7,6 +7,12 @@
 
 void precondition_init(void);
 void precondition_can_rx_hook(twai_message_t *to_push, can_bus_t rx_bus);
+
+// While true, the start/stop countdown is not drawn on the cluster (0x4E8,
+// 0x4CC): the myIONIQ app is connected and shows it on CarPlay instead, and
+// the cluster keeps showing the app's directions. Set every tick from main.c.
+void precondition_set_display_suppressed(bool suppressed);
+
 fwd_result_t precondition_fwd_hook(twai_message_t *to_send, can_bus_t fwd_bus);
 void precondition_tick(void);
 

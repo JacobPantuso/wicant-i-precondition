@@ -797,6 +797,63 @@ static void run_remote_trigger(void) {
     CHECK(sm_in(&precon_sm, &S_STOPPING));
 }
 
+static void run_display_suppressed(void) {
+    precondition_init();
+    expect_state("idle");
+
+    // --- start and verify normal display behavior ---
+    toggle();
+    expect_state("start-burst");
+    car_status(0x01, CAN_BUS_0);               // enable status frames
+    CHECK(platform.status_frame_available);
+    for (int i = 0; i < 6; i++) tick1();
+    expect_state("wait-starting");
+
+    // verify the 0x4E8 countdown is normally displayed
+    twai_message_t m;
+    CHECK(fwd(0x4E8, CAN_BUS_0, &m) == FWD_MODIFIED);
+    CHECK((m.data[6] & 0x0F) == 0x1);          // FLAG_BLUE_1 expected
+
+    // --- suppress display and verify it's blocked ---
+    precondition_set_display_suppressed(true);
+    CHECK(fwd(0x4E8, CAN_BUS_0, &m) == FWD_PASSTHROUGH);
+
+    // also verify 0x4CC is suppressed
+    CHECK(fwd(0x4CC, CAN_BUS_0, NULL) == FWD_PASSTHROUGH);
+
+    // --- unsuppress and verify display returns ---
+    precondition_set_display_suppressed(false);
+    CHECK(fwd(0x4E8, CAN_BUS_0, &m) == FWD_MODIFIED);
+    CHECK((m.data[6] & 0x0F) == 0x1);          // FLAG_BLUE_1 still expected
+
+    // complete the start
+    car_status(0x15, CAN_BUS_0);
+    expect_state("active");
+
+    // --- test suppression during stop display ---
+    fake_now += 2000000;
+    toggle();
+    expect_state("stop-burst");
+    for (int i = 0; i < 6; i++) tick1();
+    expect_state("wait-stopped");
+
+    // verify stop display normally shows
+    CHECK(fwd(0x4E8, CAN_BUS_0, &m) == FWD_MODIFIED);
+
+    // suppress and verify it's blocked
+    precondition_set_display_suppressed(true);
+    CHECK(fwd(0x4E8, CAN_BUS_0, &m) == FWD_PASSTHROUGH);
+    CHECK(fwd(0x4CC, CAN_BUS_0, NULL) == FWD_PASSTHROUGH);
+
+    // unsuppress and verify display returns
+    precondition_set_display_suppressed(false);
+    CHECK(fwd(0x4E8, CAN_BUS_0, &m) == FWD_MODIFIED);
+
+    // finish
+    car_status(0x01, CAN_BUS_0);
+    expect_state("idle");
+}
+
 // that latch on first use
 typedef struct {
     const char *name;
@@ -816,6 +873,7 @@ static const suite_t suites[] = {
     {"precondition persistent write retry limit", PERSISTENT, PRESS_SHORT, run_persistent_write_retry_limit},
     {"precondition once ignores stored latch", ONCE, PRESS_SHORT, run_once_ignores_stored_latch},
     {"precondition remote trigger", ONCE, PRESS_SHORT, run_remote_trigger},
+    {"precondition display suppressed", ONCE, PRESS_SHORT, run_display_suppressed},
 };
 #define NUM_SUITES (sizeof(suites) / sizeof(suites[0]))
 

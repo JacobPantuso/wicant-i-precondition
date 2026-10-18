@@ -486,10 +486,18 @@ static void send_precondition_stop_msg(uint32_t burst_tick) {
 
 // ********************* shared state helpers *********************
 
+// See precondition_set_display_suppressed. Written by the CAN task's tick and
+// read by the forward hooks on the same task.
+static volatile bool display_suppressed = false;
+
+void precondition_set_display_suppressed(bool suppressed) {
+    display_suppressed = suppressed;
+}
+
 // 0x4E8/0x4CC countdown display while a start is in flight
 // (shared by START_BURST, WAIT_STARTING, and WAIT_STARTED)
 static fwd_result_t starting_display_fwd(sm_t *sm, twai_message_t *to_send, can_bus_t fwd_bus) {
-    if (fwd_bus != CAR_BUS) {
+    if (fwd_bus != CAR_BUS || display_suppressed) {
         return FWD_PASSTHROUGH;
     }
     // periodic re-nudges don't touch the cluster; manual and car-start
@@ -525,7 +533,7 @@ static fwd_result_t starting_display_fwd(sm_t *sm, twai_message_t *to_send, can_
 // 0x4E8/0x4CC retry display while a stop is in flight
 // (shared by STOP_BURST and WAIT_STOPPED)
 static fwd_result_t stopping_display_fwd(sm_t *sm, twai_message_t *to_send, can_bus_t fwd_bus) {
-    if (fwd_bus != CAR_BUS) {
+    if (fwd_bus != CAR_BUS || display_suppressed) {
         return FWD_PASSTHROUGH;
     }
     // only display when we can actually confirm/retry the stop, and hide it

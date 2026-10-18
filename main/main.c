@@ -382,6 +382,8 @@ static void can_rx_task(void *pvParameters)
 		// let's just do it here for now (should be good enough for most cases)
         if ((esp_timer_get_time() - precondition_tick_last) >= PRECONDITION_TICK_PERIOD_US) {
             precondition_tick_last = esp_timer_get_time();
+            // The app shows the countdown on CarPlay while it's connected.
+            precondition_set_display_suppressed(ble_connected());
             precondition_tick();
             precondition_push_status(ble_connected());
             sniff_tick(precondition_tick_last, ble_connected());
