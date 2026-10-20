@@ -167,7 +167,7 @@ static bool activation_is_release(const message_payload_t *msg, const twai_messa
 #define PRECONDITION_STOP_TICKS (PRECONDITION_STOP_PHASE1_TICKS + PRECONDITION_STOP_PHASE2_TICKS)
 #define PRECONDITION_RETRY_US 10000000U  // 10 seconds
 #define PRECONDITION_MAX_RETRIES 4U
-#define PRECONDITION_STARTED_TIMEOUT_US 70000000U  // 70 seconds
+#define PRECONDITION_STARTED_TIMEOUT_US 90000000U  // 90 seconds: the IONIQ 6 took ~76 s from "starting" to "started" (2026-10-20), so 70 s re-burst a start that was already working
 #define PRECONDITION_CAR_START_DELAY_US 8000000U  // persistent mode: wait 8 seconds after READY before relaunching
 #define REPEATING_MODE_RETRY_INTERVAL_US (5LL * 60LL * 1000000LL)  // 5 minutes between re-nudges
 
@@ -782,7 +782,7 @@ static bool wait_started_event(sm_t *sm, sm_event_t ev) {
         case EV_STATUS_IDLE:
             // a bit odd; we previously got "starting", but now the BMU is showing "idle".
             // perhaps the SoC/temp conditions are no longer met?
-            // let's just stick with 70s retries for now.
+            // let's just stick with the started-timeout retries for now.
             return true;
     }
     return false;
