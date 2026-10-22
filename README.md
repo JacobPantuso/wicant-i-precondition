@@ -1,227 +1,162 @@
-# What is this?
+# wicant-i-precondition (Numen fork)
 
-This is a fork of the [WiCAN firmware repository](https://github.com/meatpihq/wican-fw) designed to add custom CAN-based buttons. For now, the button added is a manual preconditioning button for first-generation E-GMP cars (2021-2024 Hyundai Ioniq 5 and EV6, 2023-2025 Ioniq 6). This is only possible through direct access to CAN busses with a [custom harness](https://github.com/tylerharvey/Ioniq5_CAN/wiring_harness/) that you can build or [buy](https://electroniqbuttons.com). See [our project coordination repository](https://github.com/tylerharvey/Ioniq5_CAN) for more background.
+Firmware for a WiCAN-OBD-C3 on the [Ioniq5_CAN harness](https://github.com/tylerharvey/Ioniq5_CAN)
+([build](https://github.com/tylerharvey/Ioniq5_CAN/wiring_harness/) or [buy](https://electroniqbuttons.com))
+in a first-generation E-GMP car: 2021-2024 IONIQ 5 and EV6, 2023-2025 IONIQ 6.
+It's a fork of [L1Z3/wicant-i-precondition](https://github.com/L1Z3/wicant-i-precondition),
+which adds a manual battery preconditioning button to the
+[WiCAN firmware](https://github.com/meatpiHQ/wican-fw).
 
+You're on **`firmware/Numen`**.
 
-# This branch: the myIONIQ build
+| Branch | Adds |
+|--------|------|
+| `main` | upstream wicant-i-precondition, unchanged |
+| `feature/ble-remote-trigger` | `ATXPC`: start and stop battery preconditioning over BLE |
+| `feature/can-sniffer` | `ATXSN`: stream CAN frames over BLE (builds on the branch above) |
+| `feature/cluster-nav` | `ATXNV`/`ATXNT`: turn-by-turn on the cluster and HUD (builds on the branch above) |
+| **`firmware/Numen`** | all of the above plus seat, lock and sleep features. **Flash this one for the Numen app.** |
 
-`feature/myIONIQ` is the firmware for the **myIONIQ** iOS app on an IONIQ 6: all
-three feature branches together, each of which can also be used or upstreamed
-on its own:
+## Install
 
-| Branch | Adds | Needs |
-|--------|------|-------|
-| `feature/ble-remote-trigger` | `ATXPC` battery preconditioning over BLE, BLE write clamp, boot heap report | — |
-| `feature/can-sniffer` | `ATXSN` CAN sniffer over BLE | the branch above |
-| `feature/cluster-nav` | `ATXNV`/`ATXNT` cluster and HUD turn-by-turn | the branch above |
+You need macOS or Linux, git, and a GitHub SSH key (the ESP-IDF submodule clones over SSH).
 
-In the app: Settings → OBD → Preconditioning Adapter shows **CAN Sniffer**,
-**CarPlay Directions in Cluster** and **Cluster Codes** once the adapter answers
-`ATXSN` and `ATXNV`. The app and this firmware move together: the app splits
-long commands into BLE writes of 60 bytes, and sends the `ATXNV1`/`ATXNT` formats
-documented below.
+```sh
+git clone --recursive -b firmware/Numen https://github.com/JacobPantuso/wicant-i-precondition.git
+cd wicant-i-precondition
+./esp-idf/install.sh esp32c3   # first time only
+. ./esp-idf/export.sh          # every new shell
+./build.sh v300
+```
 
-Build and flash over USB (a flaky cable or port can stop a transfer part way;
-the slower baud rate is reliable):
+Then flash it either way:
 
-    . esp-idf/export.sh && ./build.sh v300
-    idf.py -B build.v300 -p /dev/cu.usbmodem<N> -b 115200 flash
+- **Wi-Fi:** join the WiCAN's network, open http://192.168.80.1, and upload
+  `build.v300/wican-fw_*.bin` as a firmware update.
+- **USB:** `idf.py -B build.v300 -p <port> -b 115200 flash`, where `<port>` is
+  `/dev/cu.usbmodem*` on macOS or `/dev/ttyACM0` on Linux. The slow baud rate
+  keeps a flaky cable from stopping the transfer part way.
 
-Then check the boot log's heap line (see *BLE client notes*): both CAN tasks
-must report `created: 1`.
+After a USB flash, run `idf.py -B build.v300 -p <port> monitor` and check the
+boot log's heap line: both CAN tasks must say `created: 1` (see *BLE notes*).
 
-# [WiCAN Documentation](https://meatpihq.github.io/wican-fw/) | [Firmware updates](https://github.com/L1Z3/wicant-i-precondition/releases/) | [Fluxer server](https://fluxer.gg/w0OpDJjG)
+Host tests run without ESP-IDF: `make -C test/host`.
 
-# Building
+## Using it with Numen
 
-1. Clone this repo recursively: `git clone --recursive https://github.com/L1Z3/wicant-i-precondition.git`
-2. Install ESP-IDF: `cd wicant-i-precondition/esp-idf && ./install.sh`
-3. Export the environment: `. ./export.sh`
-4. Open project and build: `cd .. && ./build.sh v300`
-5. Flash: use http interface or if using USB: `idf.py flash`
+1. With the car on, open **Settings › OBD Adapter** in Numen and tap
+   **Scan for Harness Adapter**.
+2. Pick the WiCAN and accept the iOS pairing prompt.
 
-# WiCAN-OBD-C3 Information
+**Precondition Battery** then shows on the Charge screen. **CarPlay Directions
+in Cluster** shows in Settings once the app sees `ATXNV`. The app and this
+branch move together, so update both.
 
-The WiCAN original shipped with the beta preconditioning kit is a powerful ESP32-C3-based CAN adapter for car hacking and general CAN-bus development. WiCAN connects to your existing Wi-Fi network and any device on that network, where it allows you to configure Wi-Fi and CAN settings through a built-in web interface. The WiCAN has a power-saving mode that detects when the voltage drops under 13 V or some other preset value. When this power-saving mode is engaged, WiCAN is capable of entering sleep mode, which drops current consumption below 1 mA.
+If the app says **Pairing Lost**, remove the adapter in the app and in iOS
+**Settings › Bluetooth**, then pair again.
 
-WiCAN is a simple, ready-to-use solution for CAN-bus development and hacking. It accelerates development by providing vehicle-diagnostic APIs and libraries in various languages and for various operating systems. WiCAN works with a large array of pre-existing vehicle-diagnostic libraries, including RealDash, SavvyCAN, BUSmaster, python-can/SocketCA, and more. APIs are also available for LabView, C#, VB.Net, Delphi, and Python in case you’re writing your own software.
+## Preconditioning over BLE (`ATXPC`)
 
-## Description
-![image](https://user-images.githubusercontent.com/94690098/231444160-08842087-55ad-4165-8291-b379da63aeeb.png)
+Starts and stops preconditioning over the same BLE connection an OBD app
+already uses for the WiCAN's ELM327 emulation. An adapter without this firmware
+answers `?`.
 
-WiCAN-OBD will be of great interest to car enthusiasts and tinkers who want to modernize or customize the head-unit displays in their cars using RealDash. Check out some examples of the available graphic interfaces, which are supported by a robust collection of Manuals & Tutorials to get you started with RealDash.
+| Command  | Effect | Reply |
+|----------|--------|-------|
+| `ATXPC`  | status | `XPC:<state>,<car>,<secs>,<tmin>,<tmax>,<flags>` |
+| `ATXPC0` | stop (no-op if idle) | `OK` |
+| `ATXPC1` | start (no-op if running) | `OK` |
+| `ATXPC2` | toggle, same as the button | `OK` |
 
-Another great feature of WiCAN-OBD is its MQTT battery alerts. It can monitor your battery voltage and send an alert if that voltage drops under a set threshold. This feature is especially important for users who own multiple cars they do not use regularly.
+- `state`: `0` idle, `1` requested, `2` starting, `3` active, `4` managed by the BMU, `5` stopping
+- `car`: the car's own status, `0` unknown, `1` idle, `2` starting, `3` started
+- `secs`: countdown to the next start/stop retry, `0` when nothing is pending
+- `tmin` / `tmax`: pack temperature extremes in °C, valid when flag bit 3 is set
+- `flags`: bit 0 car in READY, bit 1 status frame seen, bit 2 button held, bit 3 pack temperature valid
 
-## WiCAN-OBD2 Pinout
+Commands apply on the next 40 ms CAN tick, and the car takes tens of seconds to
+start, so poll the status rather than treating `OK` as done.
 
-<p align="center">
-<img src="https://user-images.githubusercontent.com/94690098/182854687-911bae04-9bdd-4947-8363-e088e278b3b8.png" >
-</p>
+BLE is on by default on this branch, because the WiCAN's access point is
+unreliable. The AP is still there for a while after power-up.
 
-## [**Programming Examples**](https://github.com/meatpiHQ/programming_examples/tree/master/CAN)
+The status is also pushed unsolicited as a `$XPC:...` line
+whenever it changes, and once when a client connects.
 
-### **Features and Specifications**:
+## CAN sniffer over BLE (`ATXSN`)
 
-- Supports CAN2.0A/B up to 1Mbits.
-- Works with Realdash, based on "realdash 66"
-- Supports SocketCAN and works with BUSMaster
-- Supports TCP and UDP
-- WiFi can be used in AP and station mode
-- WiFi and CAN configured using web interface.
-- Diode protection for the USB port
+Streams received CAN frames to the BLE client. Receive-only.
 
-### Remote activation over BLE (`ATXPC`)
+| Command | Effect | Reply |
+|---------|--------|-------|
+| `ATXSN` | status | `XSN:<on>,<npins>,<rx>,<sent>,<dropped>,<suppressed>,<ids>` |
+| `ATXSN0` | stop | `OK` |
+| `ATXSN1` | start, change-only for every id | `OK` |
+| `ATXSN1 63E,4CC,...` | start, and every frame of the listed ids | `OK` |
+| `ATXSN1P 63E,4CC,...` | the listed ids only | `OK` |
 
-Alongside the harness button, preconditioning can be started and stopped by a
-BLE client talking to the WiCAN's ELM327 emulation — the same connection an OBD
-app already uses, so it needs no second transport and does not disturb normal
-PID reads.
+Frames arrive as `$` lines between ordinary replies, each ending in `\r`:
 
-| Command  | Effect                                       | Reply |
-|----------|----------------------------------------------|-------|
-| `ATXPC`  | query status                                 | `XPC:<state>,<car>,<secs>,<tmin>,<tmax>,<flags>` |
-| `ATXPC0` | stop (no-op if nothing is running)           | `OK`  |
-| `ATXPC1` | start (no-op if already running)             | `OK`  |
-| `ATXPC2` | toggle — identical to pressing the button    | `OK`  |
+    $0000 0001A2F3 63E 8 0322FF0000000000   line no., µs timestamp (low 32 bits), id, DLC, data
+    $0001 ! 1532 211 0 1321 94              each second: rx, sent, dropped, suppressed, ids
 
-An adapter without this firmware answers `?`, which is how a client can tell the
-feature apart from a stock ELM327 without guessing.
+A gap in line numbers means lines were lost. Unlisted ids are sent only when
+their payload changes, at most 5 times a second; listed ("pinned") ids always
+pass, so multi-frame messages arrive whole. A busy bus still saturates BLE, so
+use `ATXSN1P` for multi-frame capture. Up to 16 pinned ids. Sniffing stops when
+BLE disconnects.
 
-Status fields:
+## Cluster and HUD turn-by-turn (`ATXNV`, `ATXNT`)
 
-- `state` — `0` idle, `1` requested, `2` starting, `3` active, `4` managed by the
-  BMU (repeating mode), `5` stopping
-- `car` — what the car reports in its own status frame: `0` unknown, `1` idle,
-  `2` starting, `3` started
-- `secs` — countdown to the next start/stop retry; `0` when nothing is pending
-- `tmin` / `tmax` — pack temperature extremes in °C, valid only when the
-  temperature flag is set
-- `flags` — bit 0 car in READY, bit 1 status frame seen, bit 2 button held,
-  bit 3 pack temperature valid
+Puts a phone app's directions on the instrument cluster and HUD. The firmware
+knows no frame layouts: the app sends each frame's bytes and a mask of which to
+overwrite, so new layouts are an app update, not a reflash. The layouts live in
+Numen's `ClusterNavFeed.swift`.
 
-Requests are queued and applied on the next 40 ms CAN tick, and the status
-snapshot is republished on that same tick, so a query issued immediately after a
-command can still report the previous state. Clients should poll rather than
-treat the `OK` as confirmation — the car itself takes tens of seconds to
-acknowledge a start.
+| Command | Effect | Reply |
+|---------|--------|-------|
+| `ATXNV` | status | `XNV:<active>,<updates>,<injected>` |
+| `ATXNV0` | stop and forget every message | `OK` |
+| `ATXNV1<frames>` | rewrite 1–5 frames, each `<id:4><mask:2><d0..d7:16>` hex | `OK` |
+| `ATXNT` | status | `XNT:<messages>,<frames>` |
+| `ATXNT<id:4><hex>` | set the ISO-TP message for that id and SID, up to 96 bytes | `OK` |
 
-Due to this implementation, the firmware associated on this branch enables BLE by default. The AP is still accessible on initial startup after power cycling the device but sometimes the AP cannot be accessed.  
+- `ATXNV1` may only rewrite `4CC`, `63E`, `640`, `641`, `4E8` and `4EA`.
+- `ATXNT` may only send `F0`, `F2` and `F4` on `6E7` and `6DF`, and `F1` on `680` and `681`.
+- Injection stops 4 s after the last `ATXNV1`, and at once on disconnect, and
+  the drawn messages are blanked.
+- A preconditioning countdown owns `4E8`/`4CC` while it runs.
+- On the single-bus V300 the rewritten frame follows the head unit's, so the
+  cluster may flicker between them.
 
-### CAN sniffer over BLE (`ATXSN`)
+## Also on this branch
 
-A second vendor command streams received CAN frames to the BLE client, for
-reverse-engineering traffic (the myIONIQ app records it while driving). It is
-receive-only: nothing is transmitted.
+| Command | Effect |
+|---------|--------|
+| `ATXST<abcd>` | set driver, passenger and rear seats: `2` off, `3`–`5` vent, `6`–`8` heat, `F` unchanged |
+| `ATXLK1` | lock the doors (there is no unlock) |
+| `ATXPS` | read the harness button's car shortcut; `ATXPS<mode>,<button>,<press>` sets it and restarts |
 
-| Command               | Effect                                                   | Reply |
-|-----------------------|----------------------------------------------------------|-------|
-| `ATXSN`               | query status                                             | `XSN:<on>,<npins>,<rx>,<sent>,<dropped>,<suppressed>,<ids>` |
-| `ATXSN0`              | stop                                                     | `OK`  |
-| `ATXSN1`              | start, change-only for every identifier                  | `OK`  |
-| `ATXSN1 63E,4CC,...`  | start, and pass every frame of the listed identifiers    | `OK`  |
-| `ATXSN1P 63E,4CC,...` | the listed identifiers only, nothing else                | `OK`  |
+- **Car-off sleep:** pick it on the web page to sleep at low voltage only when the car is off.
+- **Pairing:** a dropped connection no longer deletes the bond.
+- **No cluster countdown while the app is connected:** the app shows it instead.
 
-While running, frames arrive as `'$'`-prefixed lines between ordinary ELM327
-responses, one per line, each ending in `\r`:
+## BLE notes
 
-    $0000 0001A2F3 63E 8 0322FF0000000000   line number, timestamp (low 32 bits of µs), id, DLC, data
-    $0001 ! 1532 211 0 1321 94              once a second: rx, sent, dropped, suppressed, ids
-
-Line numbers count the lines the firmware handed to BLE, from 0000 at each
-start; a gap on the receiving side means lines were lost in transit.
-
-A whole bus does not fit through BLE, so an unlisted identifier is only sent
-when its payload changes, at most 5 times a second. Listed ("pinned")
-identifiers bypass that, so multi-frame ISO-TP messages arrive intact. On a busy
-bus even the change-only stream saturates BLE (about 30% of lines were dropped
-on a drive), and one lost frame ruins a multi-frame message, so `ATXSN1P`
-streams the pinned identifiers alone. Lines are dropped rather than let them
-crowd out command replies, and the `dropped` counter says how many. The sniffer
-stops when BLE disconnects. The pin list holds 16 identifiers at most.
-
-The change-only table (512 slots, ~16 KB) is allocated when a session starts and
-freed when it stops, in 1 KB chunks: at boot the heap can't spare it, and a
-single 16 KB block is rarely free once the device is up.
-
-### Cluster and HUD turn-by-turn (`ATXNV`, `ATXNT`)
-
-Lets a phone app put its own navigation (the myIONIQ app uses it for CarPlay
-routes) on the instrument cluster and the head-up display. The head unit keeps
-broadcasting "no guidance" nav frames while CarPlay navigates; the firmware
-rewrites those on their way to the cluster, and sends the multi-frame text and
-lane messages the head unit leaves silent under CarPlay.
-
-**The firmware knows no frame layouts.** The app sends each frame's bytes and a
-mask of which to overwrite, so decoding more of the cluster is an app update,
-not a reflash.
-
-| Command              | Effect | Reply |
-|----------------------|--------|-------|
-| `ATXNV`              | query status | `XNV:<active>,<updates>,<injected>` |
-| `ATXNV0`             | stop, and forget every multi-frame message | `OK` |
-| `ATXNV1<frames>`     | set the frames to rewrite: 1–5 × 22 hex digits, each `<id:4><mask:2><d0..d7:16>` | `OK` |
-| `ATXNT`              | query status | `XNT:<messages>,<frames>` |
-| `ATXNT<id:4><hex>`   | set the ISO-TP message for that CAN id and SID, up to 96 bytes | `OK` |
-
-- **Frames `ATXNV1` may rewrite:** `4CC`, `63E`, `640`, `641`, `4E8`, `4EA`, and
-  nothing else. The hook sees every frame bound for the cluster side, powertrain
-  included, so a bad payload must not be able to rewrite one of those. A byte
-  whose mask bit is clear keeps the head unit's value.
-- **Messages `ATXNT` may originate:** text `F0` (next street), `F2` (HUD maneuver
-  list) and `F4` (destination) on both `6E7` (cluster) and `6DF` (HUD), and the
-  81-byte `F1` lane graphic on `680` and `681`. Frames are paced 5 ms apart with
-  `AA` padding and no flow control, as the head unit sends them. Each is
-  re-sent only when it changes.
-- **Safety:** injection stops 4 s after the last `ATXNV1`, and at once when BLE
-  disconnects, so a dropped link can't leave a frozen arrow. When it lapses,
-  every message the firmware drew is replaced with the head unit's blank form
-  (`SID 00 00`, or `F1` and 80 zeros), and `ATXNV0` or a disconnect forgets
-  them.
-- **Preconditioning wins:** its countdown display owns `4E8`/`4CC` while a start
-  or stop is in flight (`fwd_hooks()` in `main.c`).
-- **Single-bus vs MITM:** on the single-bus V300 the rewritten frame is sent
-  right after the head unit's own, so the cluster may flicker between them. On
-  a dual-bus board in bridge mode the same hook replaces the frame outright.
-- Commands can be up to 254 characters (the ELM327 command buffer is 256 bytes
-  on this branch). Send them in BLE writes of 65 bytes or fewer; see below.
-
-The layouts, all from IONIQ 6 captures of the built-in nav, live in the app
-(`ClusterNavFeed.swift`):
-
-| Frame | Layout |
-|-------|--------|
-| `4CC` | `0D 00 00 <arrow> <m LE> 00 00`: arrow = clockwise angle ÷ 7.5°. `46` follow road, `09` calculating, `0A` recalculating |
-| `63E` | `00 00 <m to turn LE> <m from the car to the turn after, LE> 00 00` |
-| `640` | head unit's idle bytes, `d7` = approach bar in % |
-| `4E8` | `<tenths<<4 \| unit> <ETA h> <ETA m> <arrow−1> <destination LE> 5<flag> 00` |
-| `6E7`/`6DF` `F2` | `F2 <n> <HUD arrow ×3, 00-padded> <street> 00 00 00 00`: HUD arrows `41` straight, `42` slight R, `43` R, `44` sharp R, `45` sharp L, `46` L, `47` slight L, `48`/`49` U-turn L/R, `70` destination |
-| `680`/`681` `F1` | `[1]` lane count, `[3+i]` lane colours (overlay<<2 \| underlay: 0 none, 1 white, 2 blue, 3 grey), `[19+3i]`/`[20+3i]` underlay/overlay arrow (`01` straight … `08` slight L) |
-
-Host tests: `test/host/test_clusternav.c`.
-
-### BLE client notes
-
-- **Keep each BLE write to 65 bytes or fewer.** The receive buffer is
-  `DEV_BUFFER_LENGTH` (65) bytes. A longer write is now truncated (and logged)
-  instead of overrunning the buffer, which used to wedge command handling until
-  reboot. The ELM327 parser joins writes until the terminating `\r`, so a long
-  command can be sent in pieces.
-- **The boot log reports heap headroom.** The ESP32-C3 heap is close to its
-  limit, and `xTaskCreate` fails silently when it runs out: at one point neither
-  CAN task started, so no ELM327 command was answered and the harness button did
-  nothing. Every boot now logs (at warning level, so it survives the runtime log
-  filter):
+- Keep each BLE write to 65 bytes or fewer. Longer writes are truncated and
+  logged. The parser joins writes until `\r`, so send long commands in pieces.
+- Commands can be up to 254 characters.
+- The ESP32-C3 heap is close to its limit, and a CAN task that can't be created
+  fails silently. Every boot logs:
 
       W app_main: heap before CAN tasks: free 15696, largest 7680, min ever 15604
       W app_main: can_rx_task created: 1, can_tx_task created: 1, heap after: free 8880, largest 7680
 
-  Check that line after any change that adds a static buffer or a queue.
-- The Wi-Fi TCP reply queue is 32 slots, down from 128, to leave room for the
-  CAN tasks' stacks.
+  Check it after any change that adds a static buffer or a queue.
 
 ---
-![Modes](https://user-images.githubusercontent.com/94690098/222961571-bd137341-808a-4f0a-9528-789fe24d640e.png "Connection Mode")
----
 
-Images of WiCANs © 2026 meatPi Electronics | www.meatpi.com | PO Box 5005 Clayton, VIC 3168, Australia
+[WiCAN docs](https://meatpihq.github.io/wican-fw/) ·
+[Upstream releases](https://github.com/L1Z3/wicant-i-precondition/releases/) ·
+[Project background](https://github.com/tylerharvey/Ioniq5_CAN) ·
+[Fluxer server](https://fluxer.gg/w0OpDJjG)
