@@ -1,50 +1,49 @@
-# What is this?
+# wicant-i-precondition (Numen fork)
 
-This is a fork of the [WiCAN firmware repository](https://github.com/meatpihq/wican-fw) designed to add custom CAN-based buttons. For now, the button added is a manual preconditioning button for first-generation E-GMP cars (2021-2024 Hyundai Ioniq 5 and EV6, 2023-2025 Ioniq 6). This is only possible through direct access to CAN busses with a [custom harness](https://github.com/tylerharvey/Ioniq5_CAN/wiring_harness/) that you can build or [buy](https://electroniqbuttons.com). See [our project coordination repository](https://github.com/tylerharvey/Ioniq5_CAN) for more background.
+Firmware for a WiCAN-OBD-C3 on the [Ioniq5_CAN harness](https://github.com/tylerharvey/Ioniq5_CAN)
+([build](https://github.com/tylerharvey/Ioniq5_CAN/wiring_harness/) or [buy](https://electroniqbuttons.com))
+in a first-generation E-GMP car: 2021-2024 IONIQ 5 and EV6, 2023-2025 IONIQ 6.
+It's a fork of [L1Z3/wicant-i-precondition](https://github.com/L1Z3/wicant-i-precondition),
+which adds a manual battery preconditioning button to the
+[WiCAN firmware](https://github.com/meatpiHQ/wican-fw).
 
-# [WiCAN Documentation](https://meatpihq.github.io/wican-fw/) | [Firmware updates](https://github.com/L1Z3/wicant-i-precondition/releases/) | [Fluxer server](https://fluxer.gg/w0OpDJjG)
+You're on **`main`**.
 
-# Building
+| Branch | Adds |
+|--------|------|
+| **`main`** | upstream wicant-i-precondition, unchanged |
+| `feature/ble-remote-trigger` | `ATXPC`: start and stop battery preconditioning over BLE |
+| `feature/can-sniffer` | `ATXSN`: stream CAN frames over BLE (builds on the branch above) |
+| `feature/cluster-nav` | `ATXNV`/`ATXNT`: turn-by-turn on the cluster and HUD (builds on the branch above) |
+| `firmware/Numen` | all of the above plus seat, lock and sleep features. **Flash this one for the Numen app.** |
 
-1. Clone this repo recursively: `git clone --recursive https://github.com/L1Z3/wicant-i-precondition.git`
-2. Install ESP-IDF: `cd wicant-i-precondition/esp-idf && ./install.sh`
-3. Export the environment: `. ./export.sh`
-4. Open project and build: `cd .. && ./build.sh v300`
-5. Flash: use http interface or if using USB: `idf.py flash`
+This branch matches upstream. For the Numen app, use [`firmware/Numen`](https://github.com/JacobPantuso/wicant-i-precondition/tree/firmware/Numen).
 
-# WiCAN-OBD-C3 Information
+## Install
 
-The WiCAN original shipped with the beta preconditioning kit is a powerful ESP32-C3-based CAN adapter for car hacking and general CAN-bus development. WiCAN connects to your existing Wi-Fi network and any device on that network, where it allows you to configure Wi-Fi and CAN settings through a built-in web interface. The WiCAN has a power-saving mode that detects when the voltage drops under 13 V or some other preset value. When this power-saving mode is engaged, WiCAN is capable of entering sleep mode, which drops current consumption below 1 mA.
+You need macOS or Linux, git, and a GitHub SSH key (the ESP-IDF submodule clones over SSH).
 
-WiCAN is a simple, ready-to-use solution for CAN-bus development and hacking. It accelerates development by providing vehicle-diagnostic APIs and libraries in various languages and for various operating systems. WiCAN works with a large array of pre-existing vehicle-diagnostic libraries, including RealDash, SavvyCAN, BUSmaster, python-can/SocketCA, and more. APIs are also available for LabView, C#, VB.Net, Delphi, and Python in case you’re writing your own software.
+```sh
+git clone --recursive -b main https://github.com/JacobPantuso/wicant-i-precondition.git
+cd wicant-i-precondition
+./esp-idf/install.sh esp32c3   # first time only
+. ./esp-idf/export.sh          # every new shell
+./build.sh v300
+```
 
-## Description
-![image](https://user-images.githubusercontent.com/94690098/231444160-08842087-55ad-4165-8291-b379da63aeeb.png)
+Then flash it either way:
 
-WiCAN-OBD will be of great interest to car enthusiasts and tinkers who want to modernize or customize the head-unit displays in their cars using RealDash. Check out some examples of the available graphic interfaces, which are supported by a robust collection of Manuals & Tutorials to get you started with RealDash.
+- **Wi-Fi:** join the WiCAN's network, open http://192.168.80.1, and upload
+  `build.v300/wican-fw_*.bin` as a firmware update.
+- **USB:** `idf.py -B build.v300 -p <port> -b 115200 flash`, where `<port>` is
+  `/dev/cu.usbmodem*` on macOS or `/dev/ttyACM0` on Linux. The slow baud rate
+  keeps a flaky cable from stopping the transfer part way.
 
-Another great feature of WiCAN-OBD is its MQTT battery alerts. It can monitor your battery voltage and send an alert if that voltage drops under a set threshold. This feature is especially important for users who own multiple cars they do not use regularly.
-
-## WiCAN-OBD2 Pinout
-
-<p align="center">
-<img src="https://user-images.githubusercontent.com/94690098/182854687-911bae04-9bdd-4947-8363-e088e278b3b8.png" >
-</p>
-
-## [**Programming Examples**](https://github.com/meatpiHQ/programming_examples/tree/master/CAN)
-
-### **Features and Specifications**:
-
-- Supports CAN2.0A/B up to 1Mbits.
-- Works with Realdash, based on "realdash 66"
-- Supports SocketCAN and works with BUSMaster
-- Supports TCP and UDP
-- WiFi can be used in AP and station mode
-- WiFi and CAN configured using web interface.
-- Diode protection for the USB port
-
-![Modes](https://user-images.githubusercontent.com/94690098/222961571-bd137341-808a-4f0a-9528-789fe24d640e.png "Connection Mode")
+Host tests run without ESP-IDF: `make -C test/host`.
 
 ---
 
-Images of WiCANs © 2026 meatPi Electronics | www.meatpi.com | PO Box 5005 Clayton, VIC 3168, Australia
+[WiCAN docs](https://meatpihq.github.io/wican-fw/) ·
+[Upstream releases](https://github.com/L1Z3/wicant-i-precondition/releases/) ·
+[Project background](https://github.com/tylerharvey/Ioniq5_CAN) ·
+[Fluxer server](https://fluxer.gg/w0OpDJjG)
