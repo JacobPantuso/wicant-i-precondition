@@ -19,6 +19,36 @@ You're on **`firmware/Numen`**.
 
 ## Install
 
+Download the latest build from
+[Releases](https://github.com/JacobPantuso/wicant-i-precondition/releases).
+Each release has two files for the WiCAN-OBD-C3 (V300):
+
+| File | Use it for |
+|------|------------|
+| `numen-wican-<version>.bin` | A Wi-Fi update from the WiCAN's web page. Use this one. |
+| `numen-wican-<version>-full.bin` | A USB flash, for a WiCAN that won't boot. |
+
+### Over Wi-Fi (any phone or computer)
+
+1. Power the WiCAN (plugged into the harness with the car on, or USB-C).
+2. Join its Wi-Fi network, `WiCAN_xxxxxxxxxxxx`. The default password is `@meatpi#`.
+3. Open http://192.168.80.1, go to the firmware update section, and upload
+   `numen-wican-<version>.bin`.
+4. Wait for it to restart, about a minute.
+
+Once Numen is paired, later updates install from the app:
+**Settings › OBD Adapter › Update Adapter**.
+
+### Over USB (Windows, Linux or macOS)
+
+1. Connect the WiCAN by USB-C to a computer with Chrome or Edge.
+2. Open the [ESP web flasher](https://espressif.github.io/esptool-js/) and connect at 115200 baud.
+3. Flash `numen-wican-<version>-full.bin` at address `0x0`.
+
+A USB flash erases the WiCAN's settings, so set it up again on its web page.
+
+### Building it yourself
+
 You need macOS or Linux, git, and a GitHub SSH key (the ESP-IDF submodule clones over SSH).
 
 ```sh
@@ -29,13 +59,10 @@ cd wicant-i-precondition
 ./build.sh v300
 ```
 
-Then flash it either way:
-
-- **Wi-Fi:** join the WiCAN's network, open http://192.168.80.1, and upload
-  `build.v300/wican-fw_*.bin` as a firmware update.
-- **USB:** `idf.py -B build.v300 -p <port> -b 115200 flash`, where `<port>` is
-  `/dev/cu.usbmodem*` on macOS or `/dev/ttyACM0` on Linux. The slow baud rate
-  keeps a flaky cable from stopping the transfer part way.
+Upload `build.v300/wican-fw_*.bin` as above, or flash over USB with
+`idf.py -B build.v300 -p <port> -b 115200 flash`, where `<port>` is
+`/dev/cu.usbmodem*` on macOS or `/dev/ttyACM0` on Linux. The slow baud rate
+keeps a flaky cable from stopping the transfer part way.
 
 After a USB flash, run `idf.py -B build.v300 -p <port> monitor` and check the
 boot log's heap line: both CAN tasks must say `created: 1` (see *BLE notes*).
