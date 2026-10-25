@@ -140,6 +140,8 @@ static void test_parse(void)
     // 641 and 4EA are nav frames too
     CHECK(clusternav_parse_command("10641ff0000000000000000", &s) == CLUSTERNAV_CMD_SET);
     CHECK(clusternav_parse_command("104ea400000000000001000", &s) == CLUSTERNAV_CMD_SET);
+    CHECK(clusternav_parse_command("104e9060056010000000000", &s) == CLUSTERNAV_CMD_SET);
+    CHECK(s.frames[0].id == 0x4E9 && s.frames[0].mask == 0x06 && s.frames[0].data[1] == 0x56);
     // anything else is refused
     CHECK(clusternav_parse_command("100c7ff0000000000000000", &s) == CLUSTERNAV_CMD_INVALID);
     // a partial frame
@@ -150,12 +152,12 @@ static void test_parse(void)
     CHECK(clusternav_parse_command("2", &s) == CLUSTERNAV_CMD_INVALID);
     CHECK(clusternav_parse_command("00", &s) == CLUSTERNAV_CMD_INVALID);
 
-    char many[2 + 22 * 6 + 1];
+    char many[2 + 22 * 7 + 1];
     strcpy(many, "1");
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         strcat(many, "04ccff0d00000cfa000000");
     }
-    CHECK(clusternav_parse_command(many, &s) == CLUSTERNAV_CMD_SET && s.count == 5);
+    CHECK(clusternav_parse_command(many, &s) == CLUSTERNAV_CMD_SET && s.count == 6);
     strcat(many, "04ccff0d00000cfa000000");
     CHECK(clusternav_parse_command(many, &s) == CLUSTERNAV_CMD_INVALID);
 }

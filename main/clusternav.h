@@ -26,8 +26,10 @@
 // injection stops this long after the last ATXNV1, so a dropped BLE link or
 // a killed app can't leave a frozen arrow on the cluster
 #define CLUSTERNAV_STALE_US     4000000
-// frames per ATXNV1; 5 x 22 hex digits still fits ELM327's 126-char command cap
-#define CLUSTERNAV_MAX_FRAMES   5
+// frames per ATXNV1; 6 x 22 hex digits fits the 256-byte ELM327 command
+// buffer. Six because the guidance flag (4EA) and the route frame (4E9) ride
+// along with the four turn-by-turn frames.
+#define CLUSTERNAV_MAX_FRAMES   6
 #define CLUSTERNAV_FRAME_BYTES  11       // id (2), mask, d[0..7]
 
 // ATXNT messages: one ISO-TP message per (id, SID), no flow control (the head
@@ -49,7 +51,7 @@ typedef struct {
 
 // One ATXNV1 payload: 1..CLUSTERNAV_MAX_FRAMES frames, each on the wire as
 // 11 bytes = 22 hex digits: id (big-endian), mask, d[0..7]. Only the
-// cluster's nav frames (4CC, 63E, 640, 641, 4E8, 4EA) are accepted.
+// cluster's nav frames (4CC, 63E, 640, 641, 4E8, 4E9, 4EA) are accepted.
 typedef struct {
     uint8_t count;
     clusternav_frame_t frames[CLUSTERNAV_MAX_FRAMES];

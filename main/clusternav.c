@@ -166,6 +166,8 @@ static bool frame_allowed(uint16_t id)
     case 0x640U:
     case 0x641U:
     case 0x4E8U:
+    case 0x4E9U:   // d1-d2 change when a route starts; the car recalculates
+                   // range only once it has them (parked capture 2026-10-23)
     case 0x4EAU:   // d6 goes 00 -> 10 when the built-in nav starts guiding
         return true;
     default:
