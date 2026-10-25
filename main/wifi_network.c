@@ -34,6 +34,7 @@
  #include "config_server.h"
  #include "ble.h"
  #include "dev_status.h"
+ #include "update_mode.h"
  
  #define WIFI_CONNECTED_BIT 			BIT0
  #define WIFI_FAIL_BIT     			BIT1
@@ -141,7 +142,7 @@
          wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
          ESP_LOGI(WIFI_TAG, "station "MACSTR" join, AID=%d",
                   MAC2STR(event->mac), event->aid);
-         if(config_server_get_ble_config())
+         if(config_server_get_ble_config() && !update_mode_active())
          {
              ble_disable();
              ESP_LOGW(WIFI_TAG, "disable ble");
@@ -153,7 +154,9 @@
          wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
          ESP_LOGI(WIFI_TAG, "station "MACSTR" leave, AID=%d",
                   MAC2STR(event->mac), event->aid);
-         if(config_server_get_ble_config())
+         // Not in update mode, where BLE was never started: ble_enable()
+         // re-initialises it with no queues.
+         if(config_server_get_ble_config() && !update_mode_active())
          {
              ble_enable();
              ESP_LOGW(WIFI_TAG, "enable ble");
@@ -374,7 +377,9 @@
      sprintf((char *)wifi_config_ap.ap.ssid,"WiCAN_%02x%02x%02x%02x%02x%02x",
              derived_mac_addr[0], derived_mac_addr[1], derived_mac_addr[2],
              derived_mac_addr[3], derived_mac_addr[4], derived_mac_addr[5]);
-     strcpy( (char*)wifi_config_ap.ap.password, (char*)config_server_get_ap_pass());
+     // Update mode swaps in the one-boot password the app was given over BLE.
+     const char *ap_pass = update_mode_password();
+     strcpy( (char*)wifi_config_ap.ap.password, ap_pass ? ap_pass : (char*)config_server_get_ap_pass());
  
      esp_err_t hostname_err = esp_netif_set_hostname(sta_netif, (char *)wifi_config_ap.ap.ssid);
      if (hostname_err == ESP_OK)

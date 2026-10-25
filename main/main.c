@@ -58,6 +58,7 @@
 #include "precondition.h"
 #include "sniff.h"
 #include "clusternav.h"
+#include "update_mode.h"
 #include "bodycmd.h"
 #include "esp_heap_caps.h"
 #include "debug_logs.h"
@@ -595,7 +596,10 @@ void app_main(void)
     xMsg_Tx_Queue = xQueueCreate(32, sizeof( xdev_buffer) );
     xmsg_ws_tx_queue = xQueueCreate(8, sizeof( xdev_buffer) );
 
-	esp_ota_mark_app_valid_cancel_rollback();
+	// Marked valid only once the CAN tasks are up (below), not here: a build
+	// that boots but can't start them (the 2026-09-25 heap failure) has to
+	// roll back after an update from the app rather than stick.
+	bool updating = update_mode_begin();
 //    xmsg_obd_rx_queue = xQueueCreate(100, sizeof( twai_message_t) );
 
     ESP_ERROR_CHECK(esp_read_mac(derived_mac_addr, ESP_MAC_WIFI_SOFTAP));
@@ -755,7 +759,9 @@ void app_main(void)
 		}
 	}
 	
-    if(config_server_get_ble_config())
+    // Not in update mode: a phone reconnecting over BLE would turn Wi-Fi off
+    // again (ble.c, CONNECT_EVT) before the app could upload.
+    if(config_server_get_ble_config() && !updating)
     {
     	int pass = config_server_ble_pass();
     	// 64 x 76 B: the sniffer's pinned streams peak far below this, and
@@ -806,13 +812,31 @@ void app_main(void)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
+    if (rx_ok == pdPASS && tx_ok == pdPASS)
+    {
+        esp_ota_mark_app_valid_cancel_rollback();
+    }
+    else
+    {
+        // A fresh update that can't run the CAN tasks goes back to the build
+        // before it. An established build has nothing to go back to.
+        esp_ota_img_states_t state;
+        if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
+            state == ESP_OTA_IMG_PENDING_VERIFY)
+        {
+            ESP_LOGE(TAG, "CAN tasks failed on a new build; rolling back");
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+        }
+        ESP_LOGE(TAG, "CAN tasks failed to start");
+    }
+
     // sleep_config: 1 = low-voltage sleep, 2 = car-off sleep. Both run the
     // same state machine in sleep_mode.c and use sleep_voltage as the battery
     // sleep threshold; car-off sleep additionally refuses to sleep while the
     // car is awake (CAR_ON_THRESHOLD_V on the sense pin, or the CAN-derived
     // car_in_ready()). 
     uint8_t sleep_config = config_server_get_sleep_config();
-	if(sleep_config == 1 || sleep_config == 2) // "enable" or "car_off"
+	if(!updating && (sleep_config == 1 || sleep_config == 2)) // "enable" or "car_off"; never mid-update
 	{
 		float sleep_voltage = 0;
 

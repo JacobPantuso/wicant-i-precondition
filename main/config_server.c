@@ -76,6 +76,7 @@
 #include "ha_webhooks.h"
 #include "precondition.h"
 #include "esp_timer.h"
+#include "update_mode.h"
 
 #define WIFI_CONNECTED_BIT			BIT0
 #define WS_CONNECTED_BIT			BIT1
@@ -1177,6 +1178,9 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
 {
     char filepath[FILE_PATH_MAX];
     uint32_t total_size = 0;
+
+    // Keep update mode's timeout from rebooting mid-transfer.
+    update_mode_hold();
 
     if(config_server_get_ble_config())
     {

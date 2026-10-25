@@ -121,7 +121,7 @@ Numen's `ClusterNavFeed.swift`.
 | `ATXNT` | status | `XNT:<messages>,<frames>` |
 | `ATXNT<id:4><hex>` | set the ISO-TP message for that id and SID, up to 96 bytes | `OK` |
 
-- `ATXNV1` may only rewrite `4CC`, `63E`, `640`, `641`, `4E8` and `4EA`.
+- `ATXNV1` may only rewrite `4CC`, `63E`, `640`, `641`, `4E8`, `4E9` and `4EA`, up to six at a time.
 - `ATXNT` may only send `F0`, `F2` and `F4` on `6E7` and `6DF`, and `F1` on `680` and `681`.
 - Injection stops 4 s after the last `ATXNV1`, and at once on disconnect, and
   the drawn messages are blanked.
@@ -136,6 +136,8 @@ Numen's `ClusterNavFeed.swift`.
 | `ATXST<abcd>` | set driver, passenger and rear seats: `2` off, `3`–`5` vent, `6`–`8` heat, `F` unchanged |
 | `ATXLK1` | lock the doors (there is no unlock) |
 | `ATXPS` | read the harness button's car shortcut; `ATXPS<mode>,<button>,<press>` sets it and restarts |
+| `ATXVER` | the running build, `XVER:<version>` |
+| `ATXOTA` | reboot into update mode for the app: answers `XOTA:<ssid>,<password>`, then one boot with BLE off and the access point up on that one-time password for 5 minutes |
 
 - **Car-off sleep:** pick it on the web page to sleep at low voltage only when the car is off.
 - **Pairing:** a dropped connection no longer deletes the bond.

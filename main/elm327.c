@@ -41,6 +41,8 @@
 #include "sniff.h"
 #include "clusternav.h"
 #include "bodycmd.h"
+#include "update_mode.h"
+#include "esp_app_desc.h"
 #include "config_server.h"
 
 #define TAG 		__func__
@@ -1305,6 +1307,36 @@ static char* elm327_precon_setup(const char* command_str)
 	return config_server_set_precon_setup(mode, button, press) ? (char*)ok_str : NULL;
 }
 
+/*
+ * ATXOTA - reboot into update mode (update_mode.c) so the Numen app can
+ * install firmware over Wi-Fi: BLE stays off for that boot and the access
+ * point comes up with a random password, good for that boot only.
+ *
+ *   ATXOTA   -> XOTA:<ssid>,<password>, then reboots 500 ms later
+ *
+ * ATXVER - the running build, as the app compares it with the one it ships.
+ *
+ *   ATXVER   -> XVER:<version>   (git describe, e.g. v420_eb-012-beta-24-g95bd2a9)
+ */
+static char* elm327_update_mode(const char* command_str)
+{
+	static char response[64];
+	if (command_str[4] != 0) return NULL;
+	char ssid[33];
+	update_mode_ap_ssid(ssid, sizeof(ssid));
+	const char *pass = update_mode_request();
+	snprintf(response, sizeof(response), "XOTA:%s,%s", ssid, pass);
+	return response;
+}
+
+static char* elm327_version(const char* command_str)
+{
+	static char response[48];
+	if (command_str[4] != 0) return NULL;
+	snprintf(response, sizeof(response), "XVER:%s", esp_app_get_description()->version);
+	return response;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1336,6 +1368,8 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xst", elm327_seat_climate},//seat heat and ventilation (see above)
 											{"xlk", elm327_door_lock},//door lock, no unlock (see above)
 											{"xps", elm327_precon_setup},//car-shortcut setup (see above)
+											{"xota", elm327_update_mode},//update mode for the app (see above)
+											{"xver", elm327_version},//firmware version (see above)
 
 											{NULL, NULL},
 									};
