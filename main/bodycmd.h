@@ -1,6 +1,7 @@
 // Head-unit body requests on M-CAN 0x4A2 for the myIONIQ app: seat heat and
-// ventilation (ATXST) and door lock (ATXLK). One sequencer, because both live
-// in the same frame and a burst of one must never interleave with the other.
+// ventilation (ATXST), door lock (ATXLK) and door unlock (ATXUL). One
+// sequencer, because they all live in the same frame and a burst of one must
+// never interleave with another.
 // See bodycmd.c for the frame layouts.
 #pragma once
 #include <stdbool.h>
@@ -15,6 +16,7 @@ typedef enum {
 typedef struct {
     uint32_t seat_requests;   // ATXST set commands accepted
     uint32_t lock_requests;   // ATXLK1 commands accepted
+    uint32_t unlock_requests; // ATXUL unlocks accepted
     uint32_t frames;          // 0x4A2 frames handed to the bus
     bool busy;                // a burst is going out
 } bodycmd_status_t;
@@ -23,16 +25,21 @@ typedef struct {
 // query; four hex digits are D5 D6 (driver, passenger, rear left, rear right).
 bodycmd_cmd_t bodycmd_parse_seat(const char *args, uint16_t *levels);
 
-// Parses what follows "ATXLK": nothing is a query, "1" is lock. There is no
-// unlock.
+// Parses what follows "ATXLK": nothing is a query, "1" is lock. Unlock is
+// ATXUL (elm327.c), which needs the app's key first.
 bodycmd_cmd_t bodycmd_parse_lock(const char *args);
 
 // Queues a seat burst. A request that arrives while another is waiting merges
 // into it: every seat that isn't F replaces the waiting one's value.
 void bodycmd_request_seats(uint16_t levels);
 
-// Queues the lock sequence. Goes ahead of a waiting seat burst.
+// Queues the lock sequence. Goes ahead of a waiting seat burst and replaces a
+// waiting unlock.
 void bodycmd_request_lock(void);
+
+// Queues the unlock sequence. Only after unlockauth_check() has passed.
+// Replaces a waiting lock; a later lock replaces it in turn.
+void bodycmd_request_unlock(void);
 
 // Every 40 ms precondition tick, on the CAN task.
 void bodycmd_tick(bool link_up);

@@ -60,6 +60,7 @@
 #include "clusternav.h"
 #include "update_mode.h"
 #include "bodycmd.h"
+#include "unlockauth.h"
 #include "esp_heap_caps.h"
 #include "debug_logs.h"
 #include "debug_logs_config.h"
@@ -562,6 +563,7 @@ void app_main(void)
 	dev_status_init();
 	dev_status_set_bits(DEV_AWAKE_BIT);
     ESP_ERROR_CHECK(nvs_flash_init());
+    unlockauth_init();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -768,6 +770,7 @@ void app_main(void)
     	// every slot is heap the CAN tasks need (see the boot heap line).
     	xmsg_ble_tx_queue = xQueueCreate(64, sizeof( xdev_buffer) );
     	ble_init(&xmsg_ble_tx_queue, &xMsg_Rx_Queue, CONNECTED_LED_GPIO_NUM, pass, &ble_uid[0]);
+    	elm327_set_ble_queue(&xmsg_ble_tx_queue);
     }
 
 
@@ -801,8 +804,9 @@ void app_main(void)
     // The heap is near its limit on the C3, and xTaskCreate fails silently when
     // it runs out: both CAN tasks once didn't start, so nothing answered ELM327
     // and preconditioning was dead. Worth one line at every boot.
+    uint32_t free_before = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT);
     ESP_LOGW(TAG, "heap before CAN tasks: free %u, largest %u, min ever %u",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)free_before,
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
     BaseType_t rx_ok = xTaskCreate(can_rx_task, "can_rx_task", 1024*3, (void*)AF_INET, 7, NULL);
@@ -811,6 +815,13 @@ void app_main(void)
              (int)rx_ok, (int)tx_ok,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    update_mode_boot_t boot = {
+        .can_tasks_ok = rx_ok == pdPASS && tx_ok == pdPASS,
+        .free_before = free_before,
+        .free_after = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+        .largest_after = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+    };
+    update_mode_note_boot(&boot);
 
     if (rx_ok == pdPASS && tx_ok == pdPASS)
     {

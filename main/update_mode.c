@@ -101,3 +101,15 @@ void update_mode_hold(void)
         esp_timer_stop(s_reboot_timer);
     }
 }
+
+static update_mode_boot_t s_boot;
+
+void update_mode_note_boot(const update_mode_boot_t *boot)
+{
+    s_boot = *boot;
+}
+
+void update_mode_get_boot(update_mode_boot_t *out)
+{
+    *out = s_boot;
+}

@@ -11,17 +11,22 @@
 //   Low/Medium/High, 6/7/8 heat Low/Medium/High. The rear seats only heat, at
 //   2/6/8. F leaves that seat alone.
 //
-// Lock (community capture; not yet seen on this car, whose idle frame has D3
-// F0 and D7 00 where the community's has FF):
+// Lock and unlock (captured on Jacob's IONIQ 6, 2026-10-27). D4 gains 0x80
+// from prepare to execute:
 //
-//   00 00 FF 73 FF FF FF 00  x4   prepare
-//   00 00 FF F3 FF FF 7F 00  x4   execute
-//   00 00 FF F3 FF FF FF 00  x3   finish
+//   lock    00 00 FF 73 FF FF FF 00  x4   prepare
+//           00 00 FF F3 FF FF 7F 00  x4   execute
+//           00 00 FF F3 FF FF FF 00  x3   finish
 //
-// Lock only. The unlock sequence is deliberately not here: anything that can
-// reach the WiCAN over BLE can send these commands, and a lock is the only one
-// that is harmless in the wrong hands. Every frame is built here; nothing the
-// app sends reaches the bytes.
+//   unlock  00 00 FF 43 FF FF C0 00  x4   prepare
+//           00 00 FF C3 FF FF C0 00  x4   execute, step 1
+//           00 00 FF C3 FF FF D0 00  x4   execute, step 2
+//           00 00 FF C3 FF FF F0 00  x2   finish
+//
+// Anything that can reach the WiCAN over BLE can send these commands, and a
+// lock is the only one that is harmless in the wrong hands, so an unlock is
+// only queued once unlockauth has checked the app's answer (elm327.c, ATXUL).
+// Every frame is built here; nothing the app sends reaches the bytes.
 
 #include <stdatomic.h>
 #include <string.h>
@@ -41,12 +46,17 @@
 #define LOCK_PREPARE      4
 #define LOCK_EXECUTE      4
 #define LOCK_FINISH       3
+#define UNLOCK_PREPARE    4
+#define UNLOCK_STEP1      4
+#define UNLOCK_STEP2      4
+#define UNLOCK_FINISH     2
 
-typedef enum { BURST_NONE = 0, BURST_SEATS, BURST_LOCK } burst_t;
+typedef enum { BURST_NONE = 0, BURST_SEATS, BURST_LOCK, BURST_UNLOCK } burst_t;
 
 // Written by the ELM327 task, taken by the CAN task.
 static _Atomic uint32_t pending_seats;   // 0 = nothing waiting
 static _Atomic bool pending_lock;
+static _Atomic bool pending_unlock;
 
 // CAN task only.
 static burst_t burst = BURST_NONE;
@@ -55,6 +65,7 @@ static uint16_t seat_levels;
 
 static _Atomic uint32_t seat_requests;
 static _Atomic uint32_t lock_requests;
+static _Atomic uint32_t unlock_requests;
 static _Atomic uint32_t frames;
 static _Atomic bool busy;
 
@@ -130,14 +141,25 @@ void bodycmd_request_seats(uint16_t levels)
 
 void bodycmd_request_lock(void)
 {
+    atomic_store(&pending_unlock, false);
     atomic_store(&pending_lock, true);
     atomic_fetch_add(&lock_requests, 1);
 }
 
+void bodycmd_request_unlock(void)
+{
+    atomic_store(&pending_lock, false);
+    atomic_store(&pending_unlock, true);
+    atomic_fetch_add(&unlock_requests, 1);
+}
+
 static int burst_length(burst_t b)
 {
-    return b == BURST_LOCK ? LOCK_PREPARE + LOCK_EXECUTE + LOCK_FINISH
-                           : SEAT_VALUE_FRAMES + SEAT_IDLE_FRAMES;
+    switch (b) {
+    case BURST_LOCK:   return LOCK_PREPARE + LOCK_EXECUTE + LOCK_FINISH;
+    case BURST_UNLOCK: return UNLOCK_PREPARE + UNLOCK_STEP1 + UNLOCK_STEP2 + UNLOCK_FINISH;
+    default:           return SEAT_VALUE_FRAMES + SEAT_IDLE_FRAMES;
+    }
 }
 
 static void build_frame(burst_t b, int n, uint8_t data[8])
@@ -149,6 +171,16 @@ static void build_frame(burst_t b, int n, uint8_t data[8])
         data[4] = 0xFF;
         data[5] = 0xFF;
         data[6] = (n >= LOCK_PREPARE && n < LOCK_PREPARE + LOCK_EXECUTE) ? 0x7F : 0xFF;
+        return;
+    }
+    if (b == BURST_UNLOCK) {
+        data[2] = 0xFF;
+        data[3] = n < UNLOCK_PREPARE ? 0x43 : 0xC3;
+        data[4] = 0xFF;
+        data[5] = 0xFF;
+        data[6] = n < UNLOCK_PREPARE + UNLOCK_STEP1                ? 0xC0
+                : n < UNLOCK_PREPARE + UNLOCK_STEP1 + UNLOCK_STEP2 ? 0xD0
+                                                                   : 0xF0;
         return;
     }
     uint16_t levels = n < SEAT_VALUE_FRAMES ? seat_levels : (uint16_t)SEAT_IDLE;
@@ -176,10 +208,13 @@ void bodycmd_tick(bool link_up)
         // A request from a client that has already gone is dropped. A burst
         // that has started always finishes, so its closing frames go out.
         bool lock = atomic_exchange(&pending_lock, false);
+        bool unlock = atomic_exchange(&pending_unlock, false);
         if (lock && link_up) {
             burst = BURST_LOCK;
+        } else if (unlock && link_up) {
+            burst = BURST_UNLOCK;
         } else {
-            uint32_t seats = lock ? 0 : atomic_exchange(&pending_seats, 0);
+            uint32_t seats = (lock || unlock) ? 0 : atomic_exchange(&pending_seats, 0);
             if (seats == 0 || !link_up) {
                 if (!link_up) {
                     atomic_store(&pending_seats, 0);
@@ -205,6 +240,7 @@ void bodycmd_get_status(bodycmd_status_t *out)
 {
     out->seat_requests = atomic_load(&seat_requests);
     out->lock_requests = atomic_load(&lock_requests);
+    out->unlock_requests = atomic_load(&unlock_requests);
     out->frames = atomic_load(&frames);
     out->busy = atomic_load(&busy);
 }

@@ -42,7 +42,9 @@
 #include "clusternav.h"
 #include "bodycmd.h"
 #include "update_mode.h"
+#include "unlockauth.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "config_server.h"
 
 #define TAG 		__func__
@@ -1243,7 +1245,7 @@ static char* elm327_seat_climate(const char* command_str)
  *   ATXLK        query -> XLK:<lock requests>,<frames>,<busy>
  *   ATXLK1       lock
  *
- * Lock only: there is no unlock command, by design.
+ * Unlock is ATXUL below, which needs the app's key.
  */
 static char* elm327_door_lock(const char* command_str)
 {
@@ -1268,6 +1270,94 @@ static char* elm327_door_lock(const char* command_str)
 			 (unsigned)status.busy);
 
 	return response;
+}
+
+/*
+ * Unlock commands answer only over BLE: the Wi-Fi TCP port and anything else
+ * that feeds elm327_process_cmd get '?'. Set by elm327_set_ble_queue() and
+ * per command in elm327_process_cmd.
+ */
+static QueueHandle_t *ble_reply_queue;
+static bool cmd_from_ble;
+
+void elm327_set_ble_queue(QueueHandle_t *q)
+{
+	ble_reply_queue = q;
+}
+
+/*
+ * ATXUL - door unlock (see bodycmd.c and unlockauth.h). Also a vendor
+ * extension; see ATXPC above for why the "x" prefix is safe. BLE only.
+ *
+ *   ATXUL          challenge -> XUL:<challenge>,<key stored>,<unlock requests>,<busy>
+ *   ATXUL<mac>     unlock; mac is 64 hex digits of
+ *                  HMAC-SHA256(key, "numen-unlock" || challenge bytes)
+ *
+ * Each bare ATXUL issues a new challenge, good for one answer within 10 s.
+ * A wrong or late answer is '?'.
+ */
+static char* elm327_door_unlock(const char* command_str)
+{
+	static char response[72];
+	const char *args = &command_str[3];
+
+	if (!cmd_from_ble) return NULL;
+
+	if (args[0] != 0)
+	{
+		uint8_t mac[UNLOCKAUTH_MAC_LEN];
+		if (!unlockauth_parse_hex(args, mac, sizeof(mac))) return NULL;
+		if (!unlockauth_check(UNLOCKAUTH_UNLOCK, mac)) return NULL;
+		bodycmd_request_unlock();
+		return (char*)ok_str;
+	}
+
+	char challenge[2 * UNLOCKAUTH_NONCE_LEN + 1];
+	unlockauth_new_challenge(challenge);
+	bodycmd_status_t status;
+	bodycmd_get_status(&status);
+	snprintf(response, sizeof(response), "XUL:%s,%u,%lu,%u",
+			 challenge,
+			 (unsigned)unlockauth_has_key(),
+			 (unsigned long)status.unlock_requests,
+			 (unsigned)status.busy);
+
+	return response;
+}
+
+/*
+ * ATXUK - the unlock key (see unlockauth.h). BLE only.
+ *
+ *   ATXUK          query -> XUK:<key stored>
+ *   ATXUK<key>     store the key, 64 hex digits; refused once one is stored
+ *   ATXUKV<mac>    check the key without unlocking: mac is 64 hex digits of
+ *                  HMAC-SHA256(key, "numen-verify" || challenge bytes), with
+ *                  the challenge from a bare ATXUL. OK or '?'.
+ */
+static char* elm327_unlock_key(const char* command_str)
+{
+	static char response[16];
+	const char *args = &command_str[3];
+
+	if (!cmd_from_ble) return NULL;
+
+	if (args[0] == 0)
+	{
+		snprintf(response, sizeof(response), "XUK:%u", (unsigned)unlockauth_has_key());
+		return response;
+	}
+	if (args[0] == 'v')
+	{
+		uint8_t mac[UNLOCKAUTH_MAC_LEN];
+		if (!unlockauth_parse_hex(&args[1], mac, sizeof(mac))) return NULL;
+		return unlockauth_check(UNLOCKAUTH_VERIFY, mac) ? (char*)ok_str : NULL;
+	}
+
+	uint8_t key[UNLOCKAUTH_KEY_LEN];
+	if (!unlockauth_parse_hex(args, key, sizeof(key))) return NULL;
+	bool stored = unlockauth_set_key(key);
+	memset(key, 0, sizeof(key));
+	return stored ? (char*)ok_str : NULL;
 }
 
 /*
@@ -1337,6 +1427,32 @@ static char* elm327_version(const char* command_str)
 	return response;
 }
 
+/*
+ * ATXHC - how this boot went, for the app's check after an update.
+ *
+ *   ATXHC -> XHC:<can tasks>,<free before>,<free after>,<largest after>,<free now>,<min ever>,<reset reason>
+ *
+ * can tasks is 1 when both CAN tasks started; the heap figures are main.c's
+ * boot line. reset reason is esp_reset_reason(): 3 after an update's own
+ * restart, 4-7 a crash or watchdog, 9 a brownout.
+ */
+static char* elm327_health(const char* command_str)
+{
+	static char response[80];
+	if (command_str[3] != 0) return NULL;
+	update_mode_boot_t boot;
+	update_mode_get_boot(&boot);
+	snprintf(response, sizeof(response), "XHC:%u,%lu,%lu,%lu,%u,%u,%d",
+			 (unsigned)boot.can_tasks_ok,
+			 (unsigned long)boot.free_before,
+			 (unsigned long)boot.free_after,
+			 (unsigned long)boot.largest_after,
+			 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+			 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+			 (int)esp_reset_reason());
+	return response;
+}
+
 const xelm327_cmd_t elm327_commands[] = {
 											{"fcsd", elm327_set_fc_data},// set the flow control data
 											{"fcsh", elm327_set_fc_header},// set the flow control header
@@ -1366,10 +1482,13 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xnv", elm327_cluster_nav},//cluster turn-by-turn (see above)
 											{"xnt", elm327_cluster_text},//cluster text (see above)
 											{"xst", elm327_seat_climate},//seat heat and ventilation (see above)
-											{"xlk", elm327_door_lock},//door lock, no unlock (see above)
+											{"xlk", elm327_door_lock},//door lock (see above)
+											{"xul", elm327_door_unlock},//door unlock, BLE only, needs the app's key (see above)
+											{"xuk", elm327_unlock_key},//unlock key (see above)
 											{"xps", elm327_precon_setup},//car-shortcut setup (see above)
 											{"xota", elm327_update_mode},//update mode for the app (see above)
 											{"xver", elm327_version},//firmware version (see above)
+											{"xhc", elm327_health},//boot health for the app's post-update check (see above)
 
 											{NULL, NULL},
 									};
@@ -1392,6 +1511,9 @@ int8_t elm327_process_cmd(uint8_t *buf, uint8_t len, twai_message_t *frame, Queu
 	static uint8_t cmd_len = 0;
 	static char cmd_response[128];
 	uint8_t cmd_found_flag = 0;
+
+	// Which link this command came in on; see elm327_set_ble_queue.
+	cmd_from_ble = (ble_reply_queue != NULL && q == ble_reply_queue);
 
 	for(int i = 0; i < len; i++)
 	{

@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define UPDATE_MODE_PASS_LEN 12
 
@@ -35,5 +36,17 @@ const char *update_mode_password(void);
 // An upload has started: cancel the timeout. The upload handler reboots
 // when it finishes either way.
 void update_mode_hold(void);
+
+// How this boot went, from main.c's boot heap line. ATXHC reports it so the
+// app can check a build it just installed.
+typedef struct {
+    bool can_tasks_ok;
+    uint32_t free_before;     // heap before the CAN tasks
+    uint32_t free_after;      // heap after them
+    uint32_t largest_after;   // largest free block after them
+} update_mode_boot_t;
+
+void update_mode_note_boot(const update_mode_boot_t *boot);
+void update_mode_get_boot(update_mode_boot_t *out);
 
 #endif
