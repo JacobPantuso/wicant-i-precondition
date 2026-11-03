@@ -37,6 +37,11 @@ void bodycmd_request_seats(uint16_t levels);
 // waiting unlock.
 void bodycmd_request_lock(void);
 
+// Same burst, but from the device itself (disconnect auto-lock): the BLE
+// link is down by definition, so bodycmd_tick must not drop it the way it
+// drops a dead client's request.
+void bodycmd_request_lock_local(void);
+
 // Queues the unlock sequence. Only after unlockauth_check() has passed.
 // Replaces a waiting lock; a later lock replaces it in turn.
 void bodycmd_request_unlock(void);

@@ -61,6 +61,7 @@
 #include "update_mode.h"
 #include "bodycmd.h"
 #include "unlockauth.h"
+#include "autolock.h"
 #include "esp_heap_caps.h"
 #include "debug_logs.h"
 #include "debug_logs_config.h"
@@ -391,6 +392,7 @@ static void can_rx_task(void *pvParameters)
             sniff_tick(precondition_tick_last, ble_connected());
             clusternav_tick(precondition_tick_last, ble_connected());
             bodycmd_tick(ble_connected());
+            autolock_tick();
         }
         // every pass, not the 40 ms tick: multi-frame messages go out ~5 ms apart
         clusternav_poll(esp_timer_get_time());
@@ -564,6 +566,7 @@ void app_main(void)
 	dev_status_set_bits(DEV_AWAKE_BIT);
     ESP_ERROR_CHECK(nvs_flash_init());
     unlockauth_init();
+    autolock_init();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 

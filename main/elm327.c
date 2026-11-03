@@ -41,6 +41,7 @@
 #include "sniff.h"
 #include "clusternav.h"
 #include "bodycmd.h"
+#include "autolock.h"
 #include "update_mode.h"
 #include "unlockauth.h"
 #include "esp_app_desc.h"
@@ -1273,6 +1274,28 @@ static char* elm327_door_lock(const char* command_str)
 }
 
 /*
+ * ATXAL - disconnect auto-lock (see autolock.c). Also a vendor extension;
+ * see ATXPC above for why the "x" prefix is safe.
+ *
+ *   ATXAL        query -> XAL:<armed>,<last>,<count>
+ *   ATXAL1       enable (persists)
+ *   ATXAL0       disable
+ *
+ * <armed> is whether a drive has ended and a key-holder disconnect would
+ * fire. <last> is none|locked|rejected|unconfirmed and <count> is the
+ * monotonic lifetime total, which is how the app tells a new result from
+ * one it already reported.
+ */
+static char* elm327_autolock(const char* command_str)
+{
+	static char response[48];
+	if (!autolock_command(&command_str[3], response, sizeof(response))) {
+		return NULL;	// answered with '?', as for ATXPC
+	}
+	return response;
+}
+
+/*
  * Unlock commands answer only over BLE: the Wi-Fi TCP port and anything else
  * that feeds elm327_process_cmd get '?'. Set by elm327_set_ble_queue() and
  * per command in elm327_process_cmd.
@@ -1483,6 +1506,7 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xnt", elm327_cluster_text},//cluster text (see above)
 											{"xst", elm327_seat_climate},//seat heat and ventilation (see above)
 											{"xlk", elm327_door_lock},//door lock (see above)
+											{"xal", elm327_autolock},//disconnect auto-lock (see above)
 											{"xul", elm327_door_unlock},//door unlock, BLE only, needs the app's key (see above)
 											{"xuk", elm327_unlock_key},//unlock key (see above)
 											{"xps", elm327_precon_setup},//car-shortcut setup (see above)

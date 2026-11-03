@@ -56,6 +56,7 @@ typedef enum { BURST_NONE = 0, BURST_SEATS, BURST_LOCK, BURST_UNLOCK } burst_t;
 // Written by the ELM327 task, taken by the CAN task.
 static _Atomic uint32_t pending_seats;   // 0 = nothing waiting
 static _Atomic bool pending_lock;
+static _Atomic bool pending_lock_local;  // device-originated (autolock); link may be down
 static _Atomic bool pending_unlock;
 
 // CAN task only.
@@ -146,6 +147,13 @@ void bodycmd_request_lock(void)
     atomic_fetch_add(&lock_requests, 1);
 }
 
+void bodycmd_request_lock_local(void)
+{
+    atomic_store(&pending_unlock, false);
+    atomic_store(&pending_lock_local, true);
+    atomic_fetch_add(&lock_requests, 1);
+}
+
 void bodycmd_request_unlock(void)
 {
     atomic_store(&pending_lock, false);
@@ -207,9 +215,12 @@ void bodycmd_tick(bool link_up)
     if (burst == BURST_NONE) {
         // A request from a client that has already gone is dropped. A burst
         // that has started always finishes, so its closing frames go out.
+        // A device-originated lock (autolock) goes out regardless of the
+        // link: the disconnect that triggered it is the whole point.
         bool lock = atomic_exchange(&pending_lock, false);
+        bool lock_local = atomic_exchange(&pending_lock_local, false);
         bool unlock = atomic_exchange(&pending_unlock, false);
-        if (lock && link_up) {
+        if ((lock && link_up) || lock_local) {
             burst = BURST_LOCK;
         } else if (unlock && link_up) {
             burst = BURST_UNLOCK;

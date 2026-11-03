@@ -51,6 +51,7 @@
 #include "wifi_network.h"
 #include "dev_status.h"
 #include "hw_config.h"
+#include "autolock.h"
 
 /* Attributes State Machine */
 enum
@@ -583,6 +584,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     	    spp_conn_id = param->connect.conn_id;
     	    spp_gatts_if = gatts_if;
     	    is_connected = true;
+            autolock_note_connected();
     	    xEventGroupSetBits(s_ble_event_group, BLE_CONNECTED_BIT);
     	    gpio_set_level(conn_led, LED_ON);
             // No esp_ble_set_encryption() here. It started an SMP procedure on
@@ -600,6 +602,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
 //        	config_server_restart();
             is_connected = false;
             gpio_set_level(conn_led, LED_OFF);
+            autolock_note_disconnected();
             /* start advertising again when missing the connect */
             esp_ble_gap_start_advertising(&heart_rate_adv_params);
             break;
