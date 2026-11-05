@@ -5,9 +5,9 @@
 // away" rather than "walked up". If the bus never carries 0x038 this never
 // arms and the feature stays inert — a safe default, not a guessed one.
 //
-// Trigger: the BLE client disconnects and stays gone for 10 s. iOS rebuilds
-// a dead link in under 2 s, so 10 s is safely past transient drops. A
-// reconnect cancels the hold.
+// Trigger: the BLE client disconnects and stays gone for 5 s. iOS rebuilds
+// a dead link in under 2 s, so 5 s is past transient drops while locking
+// sooner after a real walk-away. A reconnect cancels the hold.
 //
 // Guards: the car must not be in READY at fire time. Doors and seats live
 // in the IGMP's diagnostic replies (22BC03/22BC04), which reach the OBD
@@ -40,7 +40,7 @@
 #define NVS_COUNT       "count"
 #define NVS_LAST        "last"
 
-#define HOLD_US         (10LL * 1000 * 1000)      // disconnect hold
+#define HOLD_US         (5LL * 1000 * 1000)       // disconnect hold
 #define VERIFY_US       (2LL * 1000 * 1000)       // burst frames must all land
 #define ARMED_WINDOW_US (12LL * 3600 * 1000 * 1000)
 #define LOCK_BURST_FRAMES 11                      // bodycmd: 4 prepare + 4 execute + 3 finish
@@ -124,7 +124,7 @@ void autolock_note_disconnected(void)
         return;
     }
     hold_until_us = esp_timer_get_time() + HOLD_US;
-    ESP_LOGI(TAG, "key-holder disconnected while armed; locking in 10 s unless it returns");
+    ESP_LOGI(TAG, "key-holder disconnected while armed; locking in 5 s unless it returns");
 }
 
 static void fire(void)
