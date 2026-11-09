@@ -43,6 +43,7 @@
 #include "bodycmd.h"
 #include "autolock.h"
 #include "update_mode.h"
+#include "ble_ota.h"
 #include "unlockauth.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -1451,6 +1452,18 @@ static char* elm327_version(const char* command_str)
 }
 
 /*
+ * ATXOB - firmware update over BLE; see ble_ota.c.
+ *
+ *   ATXOB          -> XOB:1
+ *   ATXOB<size>    -> XOB:READY, then <size> bytes of image
+ *   ATXOBEND       -> XOB:DONE, then reboots 500 ms later
+ */
+static char* elm327_ble_ota(const char* command_str)
+{
+	return (char*)ble_ota_command(&command_str[3]);
+}
+
+/*
  * ATXHC - how this boot went, for the app's check after an update.
  *
  *   ATXHC -> XHC:<can tasks>,<free before>,<free after>,<largest after>,<free now>,<min ever>,<reset reason>
@@ -1513,6 +1526,7 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xota", elm327_update_mode},//update mode for the app (see above)
 											{"xver", elm327_version},//firmware version (see above)
 											{"xhc", elm327_health},//boot health for the app's post-update check (see above)
+											{"xob", elm327_ble_ota},//firmware update over BLE (see above)
 
 											{NULL, NULL},
 									};

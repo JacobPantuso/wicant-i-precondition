@@ -52,6 +52,7 @@
 #include "dev_status.h"
 #include "hw_config.h"
 #include "autolock.h"
+#include "ble_ota.h"
 
 /* Attributes State Machine */
 enum
@@ -87,6 +88,10 @@ static uint8_t adv_config_done = 0;
 #define EXT_ADV_MAX_EVENTS                        0
 
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX               0x40
+// The command characteristic takes a full ATT payload at a 247-byte MTU, so a
+// firmware image goes over in large writes (ble_ota.c). Commands are still
+// clamped to DEV_BUFFER_LENGTH in ESP_GATTS_WRITE_EVT.
+#define BLE_CMD_CHAR_VAL_LEN_MAX                  244
 #define BLE_SEND_BUF_SIZE                         490
 
 static uint8_t dev_name[32] = {0};
@@ -248,7 +253,7 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] =
 	    /* Characteristic Value */
 	    [IDX_CHAR_VAL_A] =
 			{{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&GATTS_CHAR_UUID_TEST_A, ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED,
-	      GATTS_DEMO_CHAR_VAL_LEN_MAX, sizeof(test1), (uint8_t *)test1}},
+	      BLE_CMD_CHAR_VAL_LEN_MAX, sizeof(test1), (uint8_t *)test1}},
 
 	    /* Client Characteristic Configuration Descriptor */
 	    [IDX_CHAR_CFG_A]  =
@@ -517,6 +522,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             }
             break;
         case ESP_GATTS_WRITE_EVT:
+            if (ble_ota_active() && profile_handle_table[IDX_CHAR_VAL_A] == param->write.handle)
+            {
+            	// Image bytes, not commands: straight to flash, and no hex
+            	// dump, which would take longer than the write itself.
+            	ble_ota_feed(param->write.value, param->write.len);
+            	break;
+            }
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_WRITE_EVT, write value:");
             esp_log_buffer_hex(GATTS_TABLE_TAG, param->write.value, param->write.len);
 
@@ -603,6 +615,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             is_connected = false;
             gpio_set_level(conn_led, LED_OFF);
             autolock_note_disconnected();
+            ble_ota_cancel();
             /* start advertising again when missing the connect */
             esp_ble_gap_start_advertising(&heart_rate_adv_params);
             break;
