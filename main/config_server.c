@@ -1699,6 +1699,76 @@ static const httpd_uri_t scan_available_pids_uri = {
     .handler   = scan_available_pids_handler,
     .user_ctx  = NULL
 };
+// Numen talks to the adapter only over BLE, through the ELM327 handler.
+// Flashing over other firmware keeps its config.json, so the defaults above
+// never apply: the harness kit ships savvycan with BLE off, and a WiCAN left
+// that way connects over BLE but never answers (Numen #47, 2026-11-08).
+// Set both once per device, before the config is loaded, so this same boot
+// comes up right. A later change by hand is left alone.
+#define NUMEN_CFG_NVS_NAMESPACE "numen_cfg"
+#define NUMEN_CFG_NVS_KEY "ble_elm_v1"
+
+static void config_server_numen_first_boot(char **cfg)
+{
+	nvs_handle_t handle;
+	uint8_t done = 0;
+	if (nvs_open(NUMEN_CFG_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+	{
+		ESP_LOGE(TAG, "numen first boot: nvs_open failed");
+		return;
+	}
+	if (nvs_get_u8(handle, NUMEN_CFG_NVS_KEY, &done) == ESP_OK && done)
+	{
+		nvs_close(handle);
+		return;
+	}
+
+	cJSON *root = cJSON_Parse(*cfg);
+	if (root == NULL)
+	{
+		ESP_LOGE(TAG, "numen first boot: config.json did not parse");
+		nvs_close(handle);
+		return;
+	}
+	const char *keys[] = { "protocol", "ble_status" };
+	const char *values[] = { "elm327", "enable" };
+	bool changed = false;
+	for (int i = 0; i < 2; i++)
+	{
+		cJSON *item = cJSON_GetObjectItem(root, keys[i]);
+		if (cJSON_IsString(item) && strcmp(item->valuestring, values[i]) == 0) continue;
+		cJSON *value = cJSON_CreateString(values[i]);
+		if (value == NULL) { cJSON_Delete(root); nvs_close(handle); return; }
+		if (item != NULL) cJSON_ReplaceItemInObject(root, keys[i], value);
+		else cJSON_AddItemToObject(root, keys[i], value);
+		changed = true;
+	}
+
+	if (changed)
+	{
+		char *json = cJSON_PrintUnformatted(root);
+		if (json == NULL) { cJSON_Delete(root); nvs_close(handle); return; }
+		FILE *f = fopen(FS_MOUNT_POINT"/config.json", "w");
+		size_t length = strlen(json);
+		bool written = f != NULL && fwrite(json, 1, length, f) == length;
+		if (f != NULL) fclose(f);
+		if (!written)
+		{
+			// Flag left unset: tried again next boot.
+			ESP_LOGE(TAG, "numen first boot: could not write config.json");
+			free(json); cJSON_Delete(root); nvs_close(handle);
+			return;
+		}
+		free(*cfg);
+		*cfg = json;
+		ESP_LOGW(TAG, "numen first boot: protocol elm327, BLE enabled");
+	}
+	cJSON_Delete(root);
+	nvs_set_u8(handle, NUMEN_CFG_NVS_KEY, 1);
+	nvs_commit(handle);
+	nvs_close(handle);
+}
+
 static void config_server_load_cfg(char *cfg)
 {
 	cJSON * root, *key = 0;
@@ -2421,6 +2491,10 @@ static httpd_handle_t config_server_init(void)
 		fread(device_config_file, sizeof(char), filesize, f);
 		device_config_file[filesize] = 0;
 		fseek(f, 0, SEEK_SET);
+		// The read handle was never closed, and the first-boot step
+		// rewrites this file.
+		fclose(f);
+		config_server_numen_first_boot(&device_config_file);
 		ESP_LOGI(TAG, "config.json: %s", device_config_file);
 		config_server_load_cfg(device_config_file);
 		
