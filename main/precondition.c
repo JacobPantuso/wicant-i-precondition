@@ -150,8 +150,11 @@ static bool activation_is_release(const message_payload_t *msg, const twai_messa
 #define STATUS_STARTED(status_byte) \
     (((status_byte) & STATUS_MASK) == 0x15U)
 
+// 0x038 for Ioniq 5/EV6, the 29-bit 0x00C03503 for Ioniq 6 (upstream 50ea1b4).
+// Ioniq 6 never matched before, so car_in_ready() stayed false and the
+// walk-away lock never armed (lifetime XAL count 0, 2026-11-10).
 #define IS_POWER_STATUS_FRAME(frame_id) \
-    ((frame_id) == 0x038U)
+    ((frame_id) == 0x038U || (frame_id) == 0x00C03503U)
 
 // TODO(ejones): unclear if this mask/value is necessary and sufficient
 #define POWER_STATUS_MASK 0x0FU
