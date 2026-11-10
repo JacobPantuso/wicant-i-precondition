@@ -224,6 +224,8 @@ static const uint8_t char_value[20]                 = {0x11, 0x22, 0x33, 0x44};
 #define CHAR_DECLARATION_SIZE       (sizeof(uint8_t))
 #define SVC_INST_ID                 0
 static uint16_t spp_mtu_size = 23;
+// The connected phone, for link RSSI reads (autolock.c).
+static esp_bd_addr_t s_remote_bda;
 static uint16_t spp_conn_id = 0xffff;
 static esp_gatt_if_t spp_gatts_if = 0xff;
 // If the client sends a larger MTU size, the ble_max_data_size will be set to
@@ -384,6 +386,11 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     ESP_LOGV(GATTS_TABLE_TAG, "GAP_EVT, event %d\n", event);
 
     switch (event) {
+    case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
+        if (param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            autolock_note_rssi(param->read_rssi_cmpl.rssi);
+        }
+        break;
     case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
         adv_config_done &= (~SCAN_RSP_CONFIG_FLAG);
         if (adv_config_done == 0){
@@ -595,6 +602,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
 
     	    spp_conn_id = param->connect.conn_id;
     	    spp_gatts_if = gatts_if;
+    	    memcpy(s_remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
     	    is_connected = true;
             autolock_note_connected();
     	    xEventGroupSetBits(s_ble_event_group, BLE_CONNECTED_BIT);
@@ -691,6 +699,13 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
 }
 
 
+
+void ble_read_rssi(void)
+{
+	if (is_connected) {
+		esp_ble_gap_read_rssi(s_remote_bda);
+	}
+}
 
 static void ble_task(void *pvParameters)
 {

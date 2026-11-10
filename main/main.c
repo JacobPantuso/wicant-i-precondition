@@ -776,6 +776,7 @@ void app_main(void)
     	ble_init(&xmsg_ble_tx_queue, &xMsg_Rx_Queue, CONNECTED_LED_GPIO_NUM, pass, &ble_uid[0]);
     	elm327_set_ble_queue(&xmsg_ble_tx_queue);
     	ble_ota_set_tx_queue(&xmsg_ble_tx_queue);
+    	autolock_set_tx_queue(&xmsg_ble_tx_queue);
     }
 
 

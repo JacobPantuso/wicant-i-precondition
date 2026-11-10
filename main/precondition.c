@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "can.h"
 #include "hsm.h"
@@ -1128,6 +1129,25 @@ static void precondition_global_tick(sm_t *sm) {
     }
 }
 
+// When the last 0x038 frame arrived, and whether it repeats. A car that's
+// switched off can put the bus to sleep before its "off" frame gets here,
+// which left car_in_ready() true for good: the disconnect auto-lock then
+// never armed, or held at fire time (2026-11-08 21:45). Only a frame seen to
+// repeat can go stale, so a car that sends it on change only behaves as
+// before. car_in_ready() itself is unchanged; autolock.c reads the fresh one.
+#define POWER_FRAME_STALE_MS  3000U
+#define POWER_FRAME_REPEAT_MS 2000U
+static volatile uint32_t power_frame_last_ms;
+static volatile bool power_frame_repeats;
+
+static void note_power_frame(void) {
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (power_frame_last_ms != 0 && now - power_frame_last_ms < POWER_FRAME_REPEAT_MS) {
+        power_frame_repeats = true;
+    }
+    power_frame_last_ms = now;
+}
+
 static void precondition_global_rx(sm_t *sm, const twai_message_t *to_push, can_bus_t rx_bus) {
     // 0x038 power status: the low nibble of byte 0 reads 0x04 while the car is
     // in READY. only act on edges
@@ -1135,6 +1155,7 @@ static void precondition_global_rx(sm_t *sm, const twai_message_t *to_push, can_
             && rx_bus == CAR_BUS
             && to_push->data_length_code >= 1U) {
         bool ready = POWER_STATUS_READY(to_push->data[0]);
+        note_power_frame();
         if (ready != car_in_ready()) {
             atomic_store_explicit(&platform.car_in_ready, ready, memory_order_relaxed);
             ESP_LOGI(TAG, "car power: %s", ready ? "ready" : "off");
@@ -1274,4 +1295,11 @@ bool precondition_get_battery_temperature(precondition_temperature_t *out) {
 
 bool car_in_ready(void) {
     return atomic_load_explicit(&platform.car_in_ready, memory_order_relaxed);
+}
+
+bool car_in_ready_fresh(void) {
+    if (!car_in_ready()) return false;
+    if (!power_frame_repeats) return true;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    return now - power_frame_last_ms < POWER_FRAME_STALE_MS;
 }

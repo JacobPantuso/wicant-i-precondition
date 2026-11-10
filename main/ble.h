@@ -27,4 +27,7 @@ void ble_send(uint8_t* buf, uint8_t buf_len);
 bool ble_tx_ready(void);
 void ble_disable(void);
 void ble_enable(void);
+// Asks for the connected phone's link RSSI; the answer goes to
+// autolock_note_rssi(). Does nothing when no phone is connected.
+void ble_read_rssi(void);
 #endif

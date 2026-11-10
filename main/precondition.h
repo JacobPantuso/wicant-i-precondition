@@ -80,5 +80,8 @@ bool precondition_get_status(precondition_status_t *out);
 // way the state machine does; false until a 0x038 frame is seen. The negation
 // is the persistent state behind the EV_CAR_NOT_READY event.
 bool car_in_ready(void);
+// car_in_ready(), except a 0x038 that used to repeat and has gone quiet for
+// 3 s counts as off: the bus can sleep before the "off" frame arrives.
+bool car_in_ready_fresh(void);
 
 #endif
