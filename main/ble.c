@@ -381,6 +381,25 @@ static void __attribute__((unused)) remove_all_bonded_devices(void)
     free(dev_list);
 }
 
+// Advertising that fails to restart leaves the adapter invisible until it is
+// power-cycled: nothing else ever starts it again. Retry once a second until
+// it takes or a central connects.
+static esp_timer_handle_t adv_retry_timer = NULL;
+
+static void ble_restart_advertising(void)
+{
+    if (esp_ble_gap_start_advertising(&heart_rate_adv_params) != ESP_OK && adv_retry_timer != NULL) {
+        esp_timer_start_once(adv_retry_timer, 1000 * 1000);
+    }
+}
+
+static void adv_retry_cb(void *arg)
+{
+    if (!is_connected && esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) {
+        ble_restart_advertising();
+    }
+}
+
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     ESP_LOGV(GATTS_TABLE_TAG, "GAP_EVT, event %d\n", event);
@@ -407,6 +426,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         //advertising start complete event to indicate advertising start successfully or failed
         if (param->adv_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
             ESP_LOGE(GATTS_TABLE_TAG, "advertising start failed, error status = %x", param->adv_start_cmpl.status);
+            if (!is_connected && adv_retry_timer != NULL) {
+                esp_timer_start_once(adv_retry_timer, 1000 * 1000);
+            }
             break;
         }
         ESP_LOGI(GATTS_TABLE_TAG, "advertising start success");
@@ -624,8 +646,17 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             gpio_set_level(conn_led, LED_OFF);
             autolock_note_disconnected();
             ble_ota_cancel();
+            // Nothing cleared this bit, so after the first link every
+            // ble_connected() caller (sniffer, cluster nav, the precondition
+            // display, CAN forwarding) believed a phone was still there, and
+            // ble_task spun on a dead connection id. Replies queued for the
+            // old link would also have been the first thing the next one read.
+            xEventGroupClearBits(s_ble_event_group, BLE_CONNECTED_BIT | BLE_CONGEST_BIT);
+            if (xBle_TX_Queue != NULL && *xBle_TX_Queue != NULL) {
+                xQueueReset(*xBle_TX_Queue);
+            }
             /* start advertising again when missing the connect */
-            esp_ble_gap_start_advertising(&heart_rate_adv_params);
+            ble_restart_advertising();
             break;
         case ESP_GATTS_OPEN_EVT:
             break;
@@ -736,9 +767,22 @@ static void ble_task(void *pvParameters)
 
 
 				dev_status_wait_for_bits(DEV_AWAKE_BIT, portMAX_DELAY);
+				// Waiting on a link that has since dropped would spin here
+				// until the next connect; go back to waiting for one instead.
+				bool link_lost = false;
 				while(!ble_tx_ready())
 				{
+					if(!ble_connected())
+					{
+						link_lost = true;
+						break;
+					}
 					vTaskDelay(pdMS_TO_TICKS(1));
+				}
+				if(link_lost)
+				{
+					ble_send_buf_len = 0;
+					continue;
 				}
 				int free_packet = esp_ble_get_cur_sendable_packets_num(spp_conn_id);
 //				int free_packet = esp_ble_get_sendable_packets_num();
@@ -887,6 +931,14 @@ void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t conn
 	{
 		s_ble_event_group = xEventGroupCreate();
 	}
+	if(adv_retry_timer == NULL)
+	{
+		const esp_timer_create_args_t adv_retry_args = {
+			.callback = adv_retry_cb,
+			.name = "adv_retry",
+		};
+		esp_timer_create(&adv_retry_args, &adv_retry_timer);
+	}
 
 	xEventGroupClearBits(s_ble_event_group, BLE_CONNECTED_BIT);
 	xEventGroupClearBits(s_ble_event_group, BLE_CONGEST_BIT);
@@ -991,6 +1043,10 @@ void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t conn
 
 void ble_disable(void)
 {
+	if(adv_retry_timer != NULL)
+	{
+		esp_timer_stop(adv_retry_timer);
+	}
 	esp_bluedroid_disable();
 	esp_bluedroid_deinit();
 	esp_bt_controller_disable();

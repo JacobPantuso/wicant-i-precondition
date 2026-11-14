@@ -154,12 +154,16 @@
          wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
          ESP_LOGI(WIFI_TAG, "station "MACSTR" leave, AID=%d",
                   MAC2STR(event->mac), event->aid);
-         // Not in update mode, where BLE was never started: ble_enable()
-         // re-initialises it with no queues.
+         // Not in update mode, where BLE was never started. Re-initialising
+         // Bluedroid at runtime (ble_enable) has to find its heap again with
+         // the AP and web server still up, and ble_init() only logs a failure,
+         // so a phone that joined the AP and left (iOS auto-joins a remembered
+         // WiCAN network) could leave the adapter with no BLE at all until it
+         // was power-cycled. A reboot always brings BLE back.
          if(config_server_get_ble_config() && !update_mode_active())
          {
-             ble_enable();
-             ESP_LOGW(WIFI_TAG, "enable ble");
+             ESP_LOGW(WIFI_TAG, "station left, restarting to bring ble back");
+             esp_restart();
          }
      }
      else if(event_id == WIFI_EVENT_AP_START)
@@ -170,11 +174,15 @@
  
  void wifi_network_deinit(void)
  {
+     // Bounded: the BLE connect handler calls this on Bluedroid's own task.
+     // Waiting forever for a station attempt to settle froze the whole BLE
+     // stack -- no GATT, no disconnect handling, no re-advertising -- whenever
+     // the idle bit never came back. esp_wifi_stop() is safe mid-connect.
      xEventGroupWaitBits(s_wifi_event_group,
                          WIFI_CONNECT_IDLE_BIT,
                          pdFALSE,
                          pdFALSE,
-                         portMAX_DELAY);
+                         pdMS_TO_TICKS(1500));
  
      xEventGroupClearBits(s_wifi_event_group, WIFI_INIT_BIT);
  
@@ -247,7 +255,12 @@
          dev_status_wait_for_bits(DEV_AWAKE_BIT, portMAX_DELAY);            
          ESP_LOGI(WIFI_TAG, "Trying to connect...");
          xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECT_IDLE_BIT);
-         esp_wifi_connect();
+         // A refused connect (Wi-Fi stopped or mid mode-switch) raises no
+         // event, so nothing would ever set the idle bit again.
+         if(esp_wifi_connect() != ESP_OK)
+         {
+             xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECT_IDLE_BIT);
+         }
          xEventGroupWaitBits(s_wifi_event_group,
                      WIFI_CONNECT_IDLE_BIT,
                      pdFALSE,
