@@ -120,5 +120,30 @@ int main(void) {
     reset(); arm(2); sample(-90, true, 4); sample(-60, true, 1);
     sample(-60, false, 1); sample(-60, true, 10); CHECK(!pending && !notifications);
 
+    // Reconnect after a real departure: two fresh close samples, no 1–2 s hold.
+    reset(); arm(2); approach_disconnected(); CHECK(approach_connected());
+    fake_now += 120000; approach_sample(-61, true, fake_now); CHECK(!pending);
+    fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(pending);
+    challenge(); CHECK(answer() && unlock_count == 1); CHECK(!answer());
+    sample(-60, true, 10); CHECK(notifications == 1);
+
+    reset(); mode = 2; CHECK(!approach_connected()); // no departure
+    sample(-60, true, 2); CHECK(!pending);
+    reset(); arm(2); approach_disconnected(); CHECK(approach_connected());
+    fake_now += 120000; approach_sample(-60, true, fake_now);
+    fake_now += 120000; approach_sample(-80, true, fake_now); CHECK(!pending);
+    fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(!pending);
+    fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(pending);
+    challenge(); fake_now += 120000; approach_sample(-80, true, fake_now); CHECK(!answer());
+
+    reset(); arm(2); approach_disconnected(); CHECK(approach_connected());
+    fake_now += RECONNECT_LIFE_US + 1;
+    approach_sample(-60, true, fake_now);
+    fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(!pending);
+    reset(); arm(2); approach_disconnected(); CHECK(approach_connected());
+    fake_now += 120000; approach_sample(-60, false, fake_now);
+    fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(!pending && !departed);
+    reset(); arm(0); CHECK(!approach_connected());
+
     return test_report("approach");
 }

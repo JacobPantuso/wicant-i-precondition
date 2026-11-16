@@ -17,6 +17,8 @@
 #define FAST_RISE_DB 8
 #define FAST_RETREAT_DB 4
 #define HISTORY_LEN 10
+#define RECONNECT_LIFE_US 3000000LL
+#define RECONNECT_CONFIRM_US 100000LL
 #define EVENT_LIFE_US 5000000LL
 #define SAMPLE_LIFE_US 1500000LL
 static unsigned mode; // 0 off, 1 detect, 2 unlock. Volatile, reset at boot.
@@ -39,10 +41,13 @@ static unsigned history_len;
 static bool fast_candidate;
 static int candidate_peak;
 static int raw_signal;
+static int64_t reconnect_until;
+static unsigned reconnect_close_samples;
 
 static void reset_detection(void) {
     near_since = 0; sample_at = 0; window_len = 0; history_len = 0;
     fast_candidate = false; challenge_issued = false;
+    reconnect_until = 0; reconnect_close_samples = 0;
 }
 
 static int median_sample(int value) {
@@ -83,6 +88,13 @@ void approach_departed(void) { departed = true; pending = false; reset_detection
 void approach_reset_session(void) {
     departed = false; pending = false; power_ok = false; reset_detection();
 }
+bool approach_connected(void) {
+    pending = false; power_ok = false;
+    reset_detection();
+    if (!departed || mode == 0) return false;
+    reconnect_until = esp_timer_get_time() + RECONNECT_LIFE_US;
+    return true;
+}
 void approach_disconnected(void) {
     pending = false; power_ok = false; reset_detection();
 }
@@ -107,6 +119,7 @@ void approach_sample(int value, bool parked_off, int64_t now) {
     signal = median_sample(value);
     if (!parked_off || signal < NEAR_DBM || value < NEAR_DBM) {
         pending = false; near_since = 0; fast_candidate = false;
+        reconnect_close_samples = 0;
         if (!parked_off) { departed = false; reset_detection(); }
         else remember_signal(signal, now);
         return;
@@ -120,10 +133,15 @@ void approach_sample(int value, bool parked_off, int64_t now) {
     if (signal > candidate_peak) candidate_peak = signal;
     if (signal < candidate_peak - FAST_RETREAT_DB) fast_candidate = false;
     remember_signal(signal, now);
+    reconnect_close_samples++;
+    bool reconnect_close = reconnect_until && now <= reconnect_until
+        && reconnect_close_samples >= 2 && window_len >= 2
+        && now - near_since >= RECONNECT_CONFIRM_US;
     int64_t dwell = fast_candidate ? FAST_DWELL_US : NEAR_DWELL_US;
-    if (window_len < 3 || now - near_since < dwell) return;
+    if (!reconnect_close && (window_len < 3 || now - near_since < dwell)) return;
     ESP_LOGI("approach", "qualified %s at %d dBm after %lld ms close",
-             fast_candidate ? "rising" : "steady", signal, (long long)((now - near_since) / 1000));
+             reconnect_close ? "reconnect" : fast_candidate ? "rising" : "steady",
+             signal, (long long)((now - near_since) / 1000));
     departed = false; // One event per departure, even in detection-only mode.
     pending = mode == 2;
     event_at = now;

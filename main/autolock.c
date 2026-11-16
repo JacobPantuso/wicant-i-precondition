@@ -89,6 +89,8 @@ static uint32_t count;
 static int8_t threshold = -85;
 static bool connected;
 static int64_t rssi_next_us;
+static int64_t reconnect_probe_until_us;
+static int64_t lock_sample_next_us;
 static volatile int latest_rssi;   // written by the BTC task
 static volatile uint32_t rssi_seq;
 static uint32_t rssi_seq_seen;
@@ -212,6 +214,11 @@ void autolock_note_connected(void)
 {
     connected = true;
     reset_signal();
+    reconnect_probe_until_us = approach_connected() ? esp_timer_get_time() + 3000000LL : 0;
+    rssi_next_us = 0;
+    lock_sample_next_us = 0;
+    rssi_seq_seen = rssi_seq; // no RSSI from the previous link can authorize return
+
     if (hold_until_us != 0) {
         ESP_LOGI(TAG, "client reconnected during the hold; not locking");
         hold_until_us = 0;
@@ -293,7 +300,6 @@ static void sample(int rssi, int64_t now)
     smoothed = smoothed_valid ? smoothed + SMOOTHING * (median - smoothed) : median;
     smoothed_valid = true;
 
-    approach_sample(rssi, parked && obd_off && !car_in_ready_fresh(), now);
     if (armed) {
         away_since = smoothed <= threshold ? (away_since ? away_since : now) : 0;
         quick_since = smoothed <= threshold - QUICK_MARGIN_DB ? (quick_since ? quick_since : now) : 0;
@@ -351,13 +357,19 @@ void autolock_tick(void)
     // waiting to see the phone come back.
     if (enabled && parked && obd_off && !ready && connected) {
         if (now >= rssi_next_us) {
-            rssi_next_us = now + RSSI_PERIOD_US;
+            rssi_next_us = now + (now < reconnect_probe_until_us ? 100000LL : RSSI_PERIOD_US);
             ble_read_rssi();
         }
         uint32_t seq = rssi_seq;
         if (seq != rssi_seq_seen) {
             rssi_seq_seen = seq;
-            sample(latest_rssi, now);
+            approach_sample(latest_rssi, parked && obd_off && !ready, now);
+            // Burst sampling is for approach only. Departure keeps its normal
+            // cadence, filter and elapsed-time safety holds.
+            if (now >= lock_sample_next_us) {
+                lock_sample_next_us = now + RSSI_PERIOD_US;
+                sample(latest_rssi, now);
+            }
         }
     }
 

@@ -6,6 +6,8 @@ void approach_set_tx_queue(QueueHandle_t *q) {}
 void approach_departed(void) {}
 void approach_reset_session(void) {}
 void approach_disconnected(void) {}
+static bool reconnect_permitted;
+bool approach_connected(void) { return reconnect_permitted; }
 void approach_sample(int s, bool p, int64_t n) {}
 static bool fake_ready;
 static int requests;
@@ -20,6 +22,7 @@ BaseType_t xQueueSend(QueueHandle_t q, const void *p, TickType_t t) { return 1; 
 static void command(const char *s) { char out[64]; CHECK(autolock_command(s, out, sizeof out)); }
 static void reset(void) {
     fake_now = 1000000; fake_ready = false; requests = 0;
+    reconnect_permitted = false; reconnect_probe_until_us = lock_sample_next_us = 0;
     memset(&fake_body, 0, sizeof fake_body);
     enabled = true; armed = false; ready_seen = false; obd_off = false;
     parked = false; connected = true; hold_until_us = 0; verify_until_us = 0;
@@ -58,5 +61,14 @@ int main(void) {
     autolock_approach_unlocked(); CHECK(!armed);
     reset(); off_after_drive(); armed = false; enabled = false;
     autolock_approach_unlocked(); CHECK(!armed);
+    reset(); off_after_drive(); reconnect_permitted = true;
+    autolock_note_rssi(-40); // stale sample from the old link
+    autolock_note_connected(); CHECK(rssi_seq_seen == rssi_seq);
+    autolock_tick(); CHECK(rssi_next_us - fake_now == 100000LL);
+    autolock_note_rssi(-63); autolock_tick();
+    CHECK(lock_sample_next_us - fake_now == RSSI_PERIOD_US);
+    fake_now += 120000; autolock_note_rssi(-62); autolock_tick();
+    CHECK(lock_sample_next_us - fake_now == RSSI_PERIOD_US - 120000);
+    fake_now += 3000000; autolock_tick(); CHECK(rssi_next_us - fake_now == RSSI_PERIOD_US);
     return test_report("autolock");
 }
