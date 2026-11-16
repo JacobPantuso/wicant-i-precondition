@@ -1,8 +1,7 @@
 // Walk-away auto-lock; see autolock.h and docs/plans/wican-disconnect-auto-lock.md.
 //
-// Arming: the car leaving READY (0x038, tracked by precondition.c) after a
-// drive. car_in_ready_fresh() also counts a 0x038 that stopped repeating as
-// off, since the bus can sleep before the "off" frame arrives.
+// Arming: fresh OBD off (ATXALP0) after an observed on session.
+// Missing CAN frames never authorize off. READY inhibits execution.
 //
 // Once armed, whichever comes first locks:
 //  - Signal: the phone's link RSSI, read here every 500 ms and smoothed as
@@ -14,8 +13,7 @@
 //
 // Guards: never while the car is in READY. Doors and seats live on the
 // diagnostic bus, out of reach here, so the app forwards its OBD reading as
-// a hold (ATXALB1). The hold lapses after 30 s unless refreshed, so an app
-// iOS has suspended can't leave it stuck.
+// a hold (ATXALB1). Only a fresh clear reading releases it (ATXALB0).
 //
 // After a lock, coming back to the car arms it again: the phone's signal at
 // least 10 dB above the line for 2 s while the car stays off. Opening the
@@ -77,14 +75,15 @@ static const char *TAG = "autolock";
 static bool enabled = true;
 static bool armed;
 static int64_t armed_at_us;
-static bool ready_seen;            // READY rose since the last drive end
+static bool obd_off;
+static bool ready_seen;            // an on session was observed
 static bool parked;                // a drive ended; the car hasn't been in READY since
 static int64_t hold_until_us;      // 0 = no disconnect hold running
 static int64_t verify_until_us;    // 0 = no burst verification running
 static uint32_t frames_at_request;
+static uint32_t locks_at_request;
 static result_t last = RESULT_NONE;
 static uint32_t count;
-static bool ready_unavailable_logged;
 
 static int8_t threshold = -85;
 static bool connected;
@@ -163,7 +162,7 @@ void autolock_set_tx_queue(QueueHandle_t *queue)
 
 static void report(char *response, size_t response_len)
 {
-    snprintf(response, response_len, "XAL:%u,%s,%lu,%d,%d",
+    snprintf(response, response_len, "XAL:%u,%s,%lu,%d,%d,1",
              armed ? 1 : 0,
              result_name(last),
              (unsigned long)count,
@@ -204,12 +203,7 @@ static void reset_signal(void)
 
 static bool app_holds(void)
 {
-    uint32_t until = hold_until_ms;
-    if (until == 0) {
-        return false;
-    }
-    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    return (int32_t)(until - now) > 0;
+    return hold_until_ms != 0; // Only a fresh clear reading releases a hold.
 }
 
 void autolock_note_connected(void)
@@ -244,7 +238,9 @@ static void fire(const char *why)
 {
     bodycmd_status_t status;
     bodycmd_get_status(&status);
+    if (status.busy) return;
     frames_at_request = status.frames;
+    locks_at_request = status.locks_completed;
     bodycmd_request_lock_local();
     verify_until_us = esp_timer_get_time() + VERIFY_US;
     ESP_LOGI(TAG, "firing walk-away lock: %s", why);
@@ -317,21 +313,13 @@ void autolock_tick(void)
     bool ready = car_in_ready_fresh();
     if (ready) {
         ready_seen = true;
+        obd_off = false;
         parked = false;
-        ready_unavailable_logged = false;
-    } else if (ready_seen) {
-        ready_seen = false;
-        parked = true;
+        armed = false;
+        hold_until_us = 0;
         reset_signal();
-        if (!armed) {
-            armed = true;
-            armed_at_us = now;
-            ESP_LOGI(TAG, "drive ended; armed for walk-away lock");
-        }
-    } else if (!armed && !parked && !ready_unavailable_logged) {
-        ready_unavailable_logged = true;
-        ESP_LOGI(TAG, "no READY signal on this bus yet; walk-away lock stays disarmed");
     }
+    // CAN silence is unknown, never an off edge. Only ATXALP0 arms.
 
     // The arming window closes after 12 h parked: by then a disconnect is
     // a battery event, not a walk-away.
@@ -343,7 +331,7 @@ void autolock_tick(void)
 
     // The phone's signal, while it matters: armed to lock, or locked and
     // waiting to see the phone come back.
-    if (enabled && parked && connected) {
+    if (enabled && parked && obd_off && !ready && connected) {
         if (now >= rssi_next_us) {
             rssi_next_us = now + RSSI_PERIOD_US;
             ble_read_rssi();
@@ -358,7 +346,7 @@ void autolock_tick(void)
     // Disconnect hold.
     if (hold_until_us != 0 && now >= hold_until_us) {
         hold_until_us = 0;
-        if (ready) {
+        if (!enabled || !armed || !obd_off || ready) {
             // Sitting in the car with the phone's radio glitching must not
             // lock; stay armed for the real walk-away.
             ESP_LOGI(TAG, "car in READY at fire time; holding the lock");
@@ -375,7 +363,7 @@ void autolock_tick(void)
     if (verify_until_us != 0) {
         bodycmd_status_t status;
         bodycmd_get_status(&status);
-        if (status.frames >= frames_at_request + LOCK_BURST_FRAMES) {
+        if (status.locks_completed > locks_at_request) {
             last = RESULT_LOCKED;
             count++;
             armed = false;   // until the phone comes back to the car
@@ -402,6 +390,26 @@ bool autolock_command(const char *args, char *response, size_t response_len)
         report(response, response_len);
         return true;
     }
+    if (args[0] == 'p' && (args[1] == '0' || args[1] == '1') && args[2] == 0) {
+        if (args[1] == '1') {
+            ready_seen = true;
+            obd_off = false;
+            parked = false;
+            armed = false;
+            hold_until_us = 0;
+            reset_signal();
+        } else if (!car_in_ready_fresh() && ready_seen && !obd_off) {
+            obd_off = true;
+            parked = true;
+            ready_seen = false;
+            armed = enabled;
+            armed_at_us = esp_timer_get_time();
+            reset_signal();
+            if (!connected && armed) hold_until_us = armed_at_us + HOLD_US;
+        }
+        snprintf(response, response_len, "OK");
+        return true;
+    }
     if (args[0] == 't') {
         char *end = NULL;
         long value = strtol(&args[1], &end, 10);
@@ -417,7 +425,7 @@ bool autolock_command(const char *args, char *response, size_t response_len)
     if (args[0] == 'b' && (args[1] == '0' || args[1] == '1') && args[2] == 0) {
         uint32_t until = 0;
         if (args[1] == '1') {
-            until = (uint32_t)(esp_timer_get_time() / 1000) + BLOCK_MS;
+            until = 1;
             if (until == 0) {
                 until = 1;
             }

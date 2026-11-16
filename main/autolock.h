@@ -9,7 +9,7 @@
 //                (signal: smoothed dBm, 0 when there's no reading)
 //   ATXAL0|1     disable | enable (persists; default enabled)
 //   ATXALT<dBm>  the walk-away line, -100 to -40 (persists; default -85)
-//   ATXALB1|0    hold for 30 s | release: the app's OBD reading says a door
+//   ATXALB1|0    hold until released | release: the app's OBD reading says a door
 //                is open or someone is seated, which this bus can't see
 //   $XAL:...     pushed after a lock, while the phone is connected
 #pragma once
@@ -35,3 +35,7 @@ void autolock_tick(void);
 
 // ATXAL<args>, with args the text after "xal".
 bool autolock_command(const char *args, char *response, size_t response_len);
+
+// XAL reports append ,1 for mandatory fresh OBD-off authorization.
+// ATXALP1: observed on, disarm. ATXALP0: observed off after on, arm.
+// Missing OBD data must never send P0. CAN silence alone cannot arm.

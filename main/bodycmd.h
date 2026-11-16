@@ -18,6 +18,8 @@ typedef struct {
     uint32_t lock_requests;   // ATXLK1 commands accepted
     uint32_t unlock_requests; // ATXUL unlocks accepted
     uint32_t frames;          // 0x4A2 frames handed to the bus
+    uint32_t locks_completed;  // full bursts with every CAN send successful
+    uint32_t unlocks_completed;
     bool busy;                // a burst is going out
 } bodycmd_status_t;
 

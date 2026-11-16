@@ -69,3 +69,8 @@ static inline void nvs_close(nvs_handle_t handle) {
     (void)handle;
     fake_nvs_write_pending = false;
 }
+
+static inline esp_err_t nvs_get_u32(nvs_handle_t h, const char *k, uint32_t *v) { return ESP_ERR_NVS_NOT_FOUND; }
+static inline esp_err_t nvs_set_u32(nvs_handle_t h, const char *k, uint32_t v) { return ESP_OK; }
+static inline esp_err_t nvs_get_i8(nvs_handle_t h, const char *k, int8_t *v) { return ESP_ERR_NVS_NOT_FOUND; }
+static inline esp_err_t nvs_set_i8(nvs_handle_t h, const char *k, int8_t v) { return ESP_OK; }
