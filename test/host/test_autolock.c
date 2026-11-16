@@ -9,6 +9,17 @@ void approach_disconnected(void) {}
 static bool reconnect_permitted;
 bool approach_connected(void) { return reconnect_permitted; }
 void approach_sample(int s, bool p, int64_t n) {}
+// Standby has its own suite (test_standby.c); here it always allows a lease.
+void standby_set_tx_queue(QueueHandle_t *q) {}
+void standby_note_drive(void) {}
+void standby_note_off(void) {}
+void standby_note_locked(const char *why) {}
+void standby_note_unlocked(void) {}
+bool standby_lease_allowed(void) { return true; }
+void standby_note_connected(void) {}
+void standby_note_disconnected(void) {}
+void standby_tick(void) {}
+int64_t standby_rssi_period_us(int64_t normal_us) { return normal_us; }
 static bool fake_ready;
 static int requests;
 static bodycmd_status_t fake_body;

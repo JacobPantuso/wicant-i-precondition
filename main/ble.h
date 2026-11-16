@@ -30,4 +30,7 @@ void ble_enable(void);
 // Asks for the connected phone's link RSSI; the answer goes to
 // autolock_note_rssi(). Does nothing when no phone is connected.
 void ble_read_rssi(void);
+// Parked standby with the phone idle at Home: ask for a slow link (400-500 ms
+// interval, latency 2) or back to a responsive one. Within Apple's limits.
+void ble_set_slow_link(bool slow);
 #endif

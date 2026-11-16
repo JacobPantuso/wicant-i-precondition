@@ -6,6 +6,15 @@
 #include "approach.h"
 #include "bodycmd.h"
 #include "unlockauth.h"
+#include "standby.h"
+
+static standby_state_t applied_state;
+static int apply_calls, slow_calls;
+static bool slow_link;
+static float vbat = 12.6f;
+void standby_platform_apply(standby_state_t s, bool pm) { applied_state = s; apply_calls++; }
+void standby_platform_slow_link(bool slow) { slow_link = slow; slow_calls++; }
+int standby_platform_reset_reason(void) { return 1; }
 
 static bool ready, radio_up = true;
 static bool direct_managed,direct_blocked;
@@ -54,6 +63,7 @@ static void advance(int milliseconds) {
             if (locking) body.locks_completed++;
             body.busy = false; body_due = 0;
         }
+        standby_note_voltage(vbat, vbat > 0);   // the ADC task, about every second
         autolock_tick();
     }
 }
@@ -124,5 +134,108 @@ int main(void) {
     command("p1");command("p0");direct_managed=true;direct_blocked=false;
     autolock_handoff_observation(true,true);connected();advance(8000);disconnected();advance(6000);
     CHECK(lock_requests==before);
+
+    // ---- Parked BLE standby -------------------------------------------------
+    char xpk[112];
+    #define PK(args) CHECK(standby_command(args, xpk, sizeof xpk))
+    direct_managed = false; direct_blocked = false; vbat = 12.6f;
+
+    // Off by default: a walk-away lock leaves WiCAN active as before.
+    start_parked_cycle(); radio_signal = -95; advance(8000);
+    command(""); CHECK(strncmp(response, "XAL:0,locked,", 13) == 0);
+    CHECK(standby_state() == STANDBY_ACTIVE);
+
+    // On: the drive's on edge grants one lease, the off edge doesn't add one.
+    PK("e1"); command("p1"); CHECK(autolock_can_handoff());
+    standby_note_lease_started(); CHECK(!autolock_can_handoff());
+    command("p1"); advance(80); CHECK(!autolock_can_handoff());   // same on session
+    command("p0"); start_parked_cycle(); CHECK(autolock_can_handoff()); // a new drive
+    standby_note_lease_started(); CHECK(!autolock_can_handoff());
+    // A lease that failed before touching the car gives it back; one that
+    // probed the car does not.
+    standby_note_lease_ended(false); CHECK(autolock_can_handoff());
+    standby_note_lease_started(); standby_note_lease_ended(true); CHECK(!autolock_can_handoff());
+
+    // WiCAN's walk-away lock enters standby; the side effects run on the tick.
+    connected(); radio_signal = -60; advance(2000);
+    radio_signal = -95; advance(8000);
+    CHECK(standby_state() == STANDBY_PARKED && applied_state == STANDBY_PARKED);
+    PK(""); CHECK(strncmp(xpk, "XPK:1,parked,walk-away,", 23) == 0);
+    CHECK(strstr(xpk, ",12600,12200,0,0,1,1") != NULL);
+
+    // The phone reconnecting from the house: no lease, no new budget.
+    int64_t entered = fake_now;
+    disconnected(); advance(1000); radio_signal = -80; connected(); advance(2000);
+    CHECK(standby_state() == STANDBY_PARKED && !autolock_can_handoff());
+    // Home idle: slow link and 2 s sampling while parked; a disconnect ends it.
+    PK("h1"); advance(80); CHECK(slow_link && slow_calls == 1);
+    CHECK(standby_rssi_period_us(500000) == 2000000);
+    disconnected(); advance(80); CHECK(!slow_link && slow_calls == 2);
+    CHECK(standby_rssi_period_us(500000) == 500000);
+    connected(); advance(80); CHECK(!slow_link);   // the hint doesn't survive a reconnect
+
+    // The 48 h budget runs from the lock, not from the last reconnect.
+    fake_now = entered + 47LL * 3600 * 1000000; advance(80);
+    CHECK(standby_state() == STANDBY_PARKED);
+    disconnected(); connected(); advance(80);
+    fake_now = entered + 48LL * 3600 * 1000000; advance(80);
+    CHECK(standby_state() == STANDBY_PROTECT && standby_protect_requested());
+    CHECK(applied_state == STANDBY_PROTECT && !autolock_can_handoff());
+    PK(""); CHECK(strncmp(xpk, "XPK:1,protect,budget,", 21) == 0);
+    // The next drive leaves protect and grants a lease.
+    command("p1"); CHECK(standby_state() == STANDBY_ACTIVE && autolock_can_handoff());
+    advance(80); CHECK(applied_state == STANDBY_ACTIVE);
+
+    // Battery floor: 2 min below it ends standby; a brief dip doesn't.
+    start_parked_cycle(); connected(); radio_signal = -95; advance(8000);
+    CHECK(standby_state() == STANDBY_PARKED);
+    vbat = 12.1f; advance(60000); vbat = 12.4f; advance(1000);
+    vbat = 12.1f; advance(100000); CHECK(standby_state() == STANDBY_PARKED);
+    advance(21000); CHECK(standby_state() == STANDBY_PROTECT);
+    PK(""); CHECK(strncmp(xpk, "XPK:1,protect,battery,", 22) == 0);
+    // No reading at all counts as low.
+    vbat = 12.6f; command("p1"); start_parked_cycle(); connected(); radio_signal = -95; advance(8000);
+    CHECK(standby_state() == STANDBY_PARKED);
+    vbat = -1; advance(121000); CHECK(standby_state() == STANDBY_PROTECT);
+    PK(""); CHECK(strncmp(xpk, "XPK:1,protect,no-voltage,", 25) == 0);
+    vbat = 12.6f;
+
+    // An accepted approach unlock leaves standby and grants the next lease.
+    command("p1"); start_parked_cycle(); connected(); radio_signal = -60; advance(2000);
+    radio_signal = -95; advance(8000); CHECK(standby_state() == STANDBY_PARKED);
+    standby_note_lease_started();   // the departure's lease, used
+    unsigned unlocks = unlock_requests;
+    disconnected(); advance(1000); radio_signal = -60; connected(); advance(400);
+    CHECK(approach_command("", response, sizeof response));
+    CHECK(approach_command("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", response, sizeof response));
+    CHECK(unlock_requests == unlocks + 1);
+    CHECK(standby_state() == STANDBY_ACTIVE && autolock_can_handoff());
+
+    // The owner locking during the lease: the same single approach unlock,
+    // standby, and no lock burst from WiCAN when they walk away.
+    command("p1"); start_parked_cycle(); connected(); radio_signal = -60; advance(1000);
+    autolock_owner_locked();
+    CHECK(standby_state() == STANDBY_PARKED);
+    PK(""); CHECK(strncmp(xpk, "XPK:1,parked,owner,", 19) == 0);
+    before = lock_requests; radio_signal = -95; advance(8000); disconnected(); advance(6000);
+    CHECK(lock_requests == before);
+    unlocks = unlock_requests;
+    radio_signal = -60; connected(); advance(400);
+    CHECK(approach_command("", response, sizeof response));
+    CHECK(strstr(response, ",-60,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != NULL);
+    CHECK(approach_command("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", response, sizeof response));
+    CHECK(unlock_requests == unlocks + 1);
+    // An owner lock while the car is on (no fresh off) is ignored.
+    command("p1"); autolock_owner_locked(); CHECK(standby_state() == STANDBY_ACTIVE);
+
+    // Turning standby off while parked returns to normal behaviour.
+    command("p1"); start_parked_cycle(); connected(); radio_signal = -95; advance(8000);
+    CHECK(standby_state() == STANDBY_PARKED);
+    PK("e0"); advance(80); CHECK(standby_state() == STANDBY_ACTIVE && applied_state == STANDBY_ACTIVE);
+
+    // Command validation.
+    CHECK(!standby_command("v11000", xpk, sizeof xpk));
+    CHECK(!standby_command("e2", xpk, sizeof xpk));
+    PK("v12000"); PK(""); CHECK(strstr(xpk, ",12000,") != NULL);
     return test_report("lock/approach integration");
 }

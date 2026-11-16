@@ -5,6 +5,7 @@
 #include "autolock.h"
 #include "bodycmd.h"
 #include "ble.h"
+#include "standby.h"
 #ifndef OBD_HANDOFF_HOST_TEST
 #include "esp_gattc_api.h"
 #include "esp_timer.h"
@@ -47,6 +48,12 @@ static portMUX_TYPE mux=portMUX_INITIALIZER_UNLOCKED;
 static uint32_t locks_before;
 static uint32_t observation_serial,applied_serial;
 static bool observation_on,observation_blocked;
+// Set by the worker when the owner locked the car during the lease; consumed
+// by obd_handoff_tick on the auto-lock task.
+static volatile bool owner_locked;
+// The lease sent at least one diagnostic request (ATZ onwards), so a failure
+// can't give the departure's lease back.
+static volatile bool touched;
 // A missing or incomplete observation always blocks while ownership is ours.
 bool obd_handoff_blocks(void) {
     portENTER_CRITICAL(&mux);
@@ -186,13 +193,14 @@ static void run(void *unused) {
     vTaskDelay(pdMS_TO_TICKS(750));
     char r[512];bool success=false;
     if(!alive()||!connect_adapter())goto finished;
-    state="probing";
+    state="probing";touched=true;
     // Reset the inherited ELM state before sending any diagnostic request.
     if(!send_cmd("ATZ",r,sizeof(r))||!ok("ATE0")||!ok("ATL0")||!ok("ATS0")||!ok("ATH0")||!ok("ATSP6")||!ok("ATAL"))goto finished;
     if(!ok("ATSH7DF")||!send_cmd("0902",r,sizeof(r))||!obd_handoff_vin(r,vin))goto finished;
     identity_ok=true;
     if(!setup_header("770"))goto finished;
     bodycmd_status_t status;bodycmd_get_status(&status);locks_before=status.locks_completed;
+    bool saw_opening=false; // someone left the car after the drive
     while(alive()&&link_up){
         bool on=false,blocked=true,rear=false,front=false;
         if(!send_cmd("22BC03",r,sizeof(r))||!obd_handoff_safety(r,&on,&blocked,&rear))goto finished;
@@ -200,6 +208,8 @@ static void run(void *unused) {
         // fabricated to force an OFF-only handoff to arm.
         portENTER_CRITICAL(&mux);clear=!blocked;observed_at=esp_timer_get_time();portEXIT_CRITICAL(&mux);
         portENTER_CRITICAL(&mux);observation_on=on;observation_blocked=blocked;observation_serial++;portEXIT_CRITICAL(&mux);
+        bool open_now=false;
+        if(obd_handoff_opening(r,&open_now)&&open_now)saw_opening=true;
         state="monitoring";
         bodycmd_get_status(&status);
         if(status.locks_completed>locks_before){
@@ -210,6 +220,18 @@ static void run(void *unused) {
             if(!send_cmd("22BC04",r,sizeof(r))||!obd_handoff_front(r,&front))goto finished;
             portENTER_CRITICAL(&mux);doors=rear&&front?"locked":"unlocked";doors_at=esp_timer_get_time();portEXIT_CRITICAL(&mux);
             if(rear&&front){success=true;goto finished;}
+        } else if(saw_opening&&!on&&!blocked&&rear){
+            // Owner lock: a door opened after the drive, now everything is
+            // shut, the car is off, nobody is belted and the rear doors read
+            // locked. Confirm the fronts, then release the adapter at once.
+            // Requiring the earlier opening keeps a driver still seated in a
+            // car that locked itself while driving from counting as a lock.
+            if(!send_cmd("22BC04",r,sizeof(r))||!obd_handoff_front(r,&front))goto finished;
+            bodycmd_get_status(&status);
+            if(front&&status.locks_completed==locks_before){
+                portENTER_CRITICAL(&mux);doors="locked";doors_at=esp_timer_get_time();portEXIT_CRITICAL(&mux);
+                owner_locked=true;success=true;goto finished;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -226,10 +248,12 @@ finished:
     // alive()==false and immediately closes; another lease is blocked meanwhile.
     state=success&&!link_up&&!opening?"done":(link_up||opening?"closing":"failed");
     active=false;worker=NULL;
-    ESP_LOGI(TAG,"handoff %s, doors %s",state,doors);
+    standby_note_lease_ended(touched);
+    ESP_LOGI(TAG,"handoff %s, doors %s%s",state,doors,owner_locked?" (owner)":"");
     vTaskDelete(NULL);
 }
 void obd_handoff_tick(void) {
+    if(owner_locked){owner_locked=false;autolock_owner_locked();}
     if(active){
         bool apply=false,on=false,blocked=true;
         portENTER_CRITICAL(&mux);
@@ -286,9 +310,11 @@ bool obd_handoff_command(const char *args,char *out,size_t cap) {
         }
         token[8] = 0;
         cancelled=false;identity_ok=false;clear=false;observed_at=0;doors_at=0;doors="unknown";state="scanning";
+        owner_locked=false;touched=false;
         portENTER_CRITICAL(&mux);applied_serial=observation_serial;portEXIT_CRITICAL(&mux);
         deadline=esp_timer_get_time()+LEASE_US;managed=true;active=true;hold();
         if(xTaskCreate(run,"obd_handoff",4096,NULL,4,&worker)!=pdPASS){active=false;state="failed";worker=NULL;return false;}
+        standby_note_lease_started();
         snprintf(out,cap,"OK");return true;
     }
     return false;

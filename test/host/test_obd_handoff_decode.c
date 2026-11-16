@@ -136,5 +136,15 @@ int main(void)
     formatted(identity, sizeof(identity) - 1, wire, sizeof(wire));
     CHECK(!obd_handoff_vin(wire, vin));
 
+    // Door/hood/trunk opening is separate from belts and ignition.
+    bool open = true;
+    CHECK(obd_handoff_opening("62BC03000000000000\r>", &open) && !open);
+    CHECK(obd_handoff_opening("62BC03000000000100\r>", &open) && open);
+    CHECK(obd_handoff_opening("62BC03000000008000\r>", &open) && open);
+    CHECK(obd_handoff_opening("62BC03000000000A00\r>", &open) && !open);  // rear unlocked only
+    CHECK(obd_handoff_opening("62BC03000000000007\r>", &open) && !open);  // belts
+    CHECK(obd_handoff_opening("62BC03000000000060\r>", &open) && !open);  // ignition
+    CHECK(!obd_handoff_opening("62BC0400000000\r>", &open));
+    CHECK(!obd_handoff_opening("62BC03000000000000\r>", NULL));
     return test_report("obd_handoff_decode");
 }

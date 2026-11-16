@@ -39,6 +39,7 @@
 #include "ble.h"
 #include "bodycmd.h"
 #include "precondition.h"
+#include "standby.h"
 #include "types.h"
 #include "unlockauth.h"
 
@@ -168,6 +169,7 @@ void autolock_set_tx_queue(QueueHandle_t *queue)
 {
     tx_queue = queue;
     approach_set_tx_queue(queue);
+    standby_set_tx_queue(queue);
 }
 
 static void report(char *response, size_t response_len)
@@ -219,6 +221,7 @@ static bool app_holds(void)
 void autolock_note_connected(void)
 {
     connected = true;
+    standby_note_connected();
     reset_signal();
     reconnect_probe_until_us = approach_connected() ? esp_timer_get_time() + 3000000LL : 0;
     rssi_next_us = 0;
@@ -234,6 +237,7 @@ void autolock_note_connected(void)
 void autolock_note_disconnected(void)
 {
     connected = false;
+    standby_note_disconnected();
     approach_disconnected();
     reset_signal();
     if (!enabled || !armed || !unlockauth_has_key()
@@ -267,6 +271,7 @@ static void fire(const char *why)
 // the separate walk-away filter has not crossed its stronger rearm threshold.
 void autolock_approach_unlocked(void)
 {
+    standby_note_unlocked();   // the owner is back: leave standby either way
     if (!enabled || !parked || !obd_off || car_in_ready_fresh()) return;
     armed = true;
     armed_at_us = esp_timer_get_time();
@@ -342,6 +347,7 @@ void autolock_tick(void)
     // never moves; say so once rather than on every tick.
     bool ready = car_in_ready_fresh();
     if (ready) {
+        standby_note_drive();
         approach_reset_session();
         ready_seen = true;
         obd_off = false;
@@ -365,7 +371,9 @@ void autolock_tick(void)
     // waiting to see the phone come back.
     if (enabled && parked && obd_off && !ready && connected) {
         if (now >= rssi_next_us) {
-            rssi_next_us = now + (now < reconnect_probe_until_us ? 100000LL : RSSI_PERIOD_US);
+            // Parked at Home with the phone idle, standby slows this to 2 s.
+            rssi_next_us = now + (now < reconnect_probe_until_us
+                                  ? 100000LL : standby_rssi_period_us(RSSI_PERIOD_US));
             ble_read_rssi();
         }
         uint32_t seq = rssi_seq;
@@ -404,6 +412,7 @@ void autolock_tick(void)
         if (status.locks_completed > locks_at_request) {
             last = RESULT_LOCKED;
             approach_departed();
+            standby_note_locked("walk-away");
             count++;
             armed = false;   // until the phone comes back to the car
             verify_until_us = 0;
@@ -421,6 +430,8 @@ void autolock_tick(void)
             push_report();
         }
     }
+
+    standby_tick();
 }
 
 static bool autolock_apply_command(const char *,char *,size_t);
@@ -434,7 +445,23 @@ void autolock_handoff_invalidate(void)
 
 bool autolock_can_handoff(void)
 {
-    return enabled && (ready_seen || (parked && obd_off));
+    return enabled && (ready_seen || (parked && obd_off)) && standby_lease_allowed();
+}
+
+// The owner locked the car (fob, handle or app) while WiCAN held the OBD
+// lease: the lease saw a door open after the drive, then every door locked
+// with the car off and nobody belted in. Same opportunity as WiCAN's own
+// walk-away lock: one approach unlock, then standby. No lock burst follows.
+void autolock_owner_locked(void)
+{
+    if (!parked || !obd_off || car_in_ready_fresh() || verify_until_us != 0) return;
+    armed = false;
+    hold_until_us = 0;
+    bodycmd_cancel_local_lock();
+    reset_signal();
+    approach_departed();
+    standby_note_locked("owner");
+    ESP_LOGI(TAG, "owner locked the car; walk-away lock stands down");
 }
 
 void autolock_handoff_observation(bool on, bool blocked)
@@ -465,6 +492,7 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
     }
     if (args[0] == 'p' && (args[1] == '0' || args[1] == '1') && args[2] == 0) {
         if (args[1] == '1') {
+            standby_note_drive();
             approach_reset_session();
             ready_seen = true;
             obd_off = false;
@@ -476,6 +504,7 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
         } else if (!car_in_ready_fresh() && ready_seen && !obd_off) {
             obd_off = true;
             parked = true;
+            standby_note_off();
             ready_seen = false;
             armed = enabled;
             armed_at_us = esp_timer_get_time();

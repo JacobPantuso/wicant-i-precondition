@@ -144,6 +144,16 @@ bool obd_handoff_safety(const char *raw, bool *on, bool *blocked, bool *rear_loc
     return true;
 }
 
+bool obd_handoff_opening(const char *raw, bool *open)
+{
+    if (!open) return false;
+    uint8_t b[128];
+    size_t n = obd_handoff_bytes(raw, b, sizeof(b));
+    if (n < 9 || b[0] != 0x62 || b[1] != 0xbc || b[2] != 3) return false;
+    *open = (b[7] & 0xb5) != 0;
+    return true;
+}
+
 bool obd_handoff_front(const char *raw, bool *locked)
 {
     if (!locked) return false;

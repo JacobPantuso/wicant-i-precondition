@@ -6,7 +6,12 @@ static uint32_t bits;
 static int close_calls,scan_calls,search_calls,write_calls,hold_calls,observe_calls;
 static bool phone=true,authorized=true;
 static EventBits_t wait_result;
-static bool scripted,ack_close,wrong_vin;
+static bool scripted,ack_close,wrong_vin,owner_script;
+static unsigned bc03_reads;
+static int lease_started,lease_ended,owner_calls;static bool lease_touched;
+void standby_note_lease_started(void){lease_started++;}
+void standby_note_lease_ended(bool touched_vehicle){lease_ended++;lease_touched=touched_vehicle;}
+void autolock_owner_locked(void){owner_calls++;}
 static unsigned body_reads;
 EventGroupHandle_t xEventGroupCreate(void){return &bits;}
 EventBits_t xEventGroupClearBits(EventGroupHandle_t g,EventBits_t b){EventBits_t old=*g;*g&=~b;return old;}
@@ -20,7 +25,7 @@ bool autolock_can_handoff(void){return authorized;}
 bool autolock_command(const char*a,char*r,size_t cap){if(!strcmp(a,"b1"))hold_calls++;snprintf(r,cap,"OK");return true;}
 void autolock_handoff_invalidate(void){authorized=false;}
 void autolock_handoff_observation(bool on,bool blocked){observe_calls++;}
-void bodycmd_get_status(bodycmd_status_t*s){memset(s,0,sizeof(*s));if(scripted&&body_reads++)s->locks_completed=1;}
+void bodycmd_get_status(bodycmd_status_t*s){memset(s,0,sizeof(*s));if(scripted&&body_reads++&&!owner_script)s->locks_completed=1;}
 int esp_ble_gattc_write_char(int a,int b,int c,int d,uint8_t*e,int f,int g){write_calls++;
  if(scripted){
    char cmd[32];memcpy(cmd,e,(size_t)d);cmd[d-1]=0;
@@ -29,7 +34,12 @@ int esp_ble_gattc_write_char(int a,int b,int c,int d,uint8_t*e,int f,int g){writ
      const char *v=wrong_vin?"KMHM141AAN0999999":vin;
      for(int i=0;i<17;i++)off+=(size_t)snprintf(reply+off,sizeof(reply)-off,"%02X",(unsigned char)v[i]);
      snprintf(reply+off,sizeof(reply)-off,"\r>");
-   }else if(!strcmp(cmd,"22BC03"))snprintf(reply,sizeof(reply),"62BC03000000000000\r>");
+   }else if(!strcmp(cmd,"22BC03")){
+     // Owner script: the driver's door opens on the first read, then shuts
+     // and every door reads locked.
+     bc03_reads++;
+     snprintf(reply,sizeof(reply),owner_script&&bc03_reads==1?"62BC03000000000100\r>":"62BC03000000000000\r>");
+   }
    else if(!strcmp(cmd,"22BC04"))snprintf(reply,sizeof(reply),"62BC040000000000\r>");
    else snprintf(reply,sizeof(reply),"OK\r>");
    reply_len=strlen(reply);bits|=REPLY;
@@ -57,6 +67,8 @@ static void reset(void){
  strcpy(vin,"KMHM141AAN0123456");strcpy(token,"-");memset(selected,0,6);
  close_calls=scan_calls=search_calls=write_calls=hold_calls=observe_calls=0;
  wait_result=0;phone=authorized=true;scripted=false;ack_close=true;wrong_vin=false;body_reads=0;
+ owner_script=false;bc03_reads=0;owner_locked=false;touched=false;
+ lease_started=lease_ended=owner_calls=0;lease_touched=false;
 }
 static void start(void){CHECK(obd_handoff_command("nabcdef12,4f4244",out,sizeof(out)));}
 int main(void){
@@ -118,5 +130,26 @@ int main(void){
  // A complete VIN reply from another vehicle never reaches safety polling.
  reset();start();scripted=true;wrong_vin=true;run(NULL);
  CHECK(!strcmp(state,"failed")&&body_reads==0&&observe_calls==0&&obd_handoff_blocks());
+ CHECK(lease_ended==1&&lease_touched);   // VIN probing touched the car: no refund
+ // Every started lease uses the departure's lease; a scan that never finds
+ // the adapter ends without touching the car.
+ reset();start();CHECK(lease_started==1);run(NULL);
+ CHECK(!strcmp(state,"failed")&&lease_ended==1&&!lease_touched&&write_calls==0);
+ // WiCAN's own lock: success, but not an owner lock.
+ reset();start();scripted=true;run(NULL);
+ CHECK(!strcmp(state,"done")&&owner_calls==0);obd_handoff_tick();CHECK(owner_calls==0);
+ // Owner lock: door opened after the drive, then all locked with no lock
+ // burst from WiCAN. The adapter is released at once and auto-lock hears
+ // about it on its own task.
+ reset();start();scripted=true;owner_script=true;run(NULL);
+ CHECK(!strcmp(state,"done")&&!strcmp(doors,"locked")&&owner_locked&&!link_up);
+ CHECK(bc03_reads==2&&lease_ended==1&&lease_touched);
+ obd_handoff_tick();CHECK(owner_calls==1&&!owner_locked);
+ obd_handoff_tick();CHECK(owner_calls==1);
+ // All locked without any door opening first (a car that locked itself
+ // while driving, driver still seated): not an owner lock; keep monitoring
+ // until the lease runs out.
+ reset();start();scripted=true;owner_script=true;bc03_reads=1;run(NULL);
+ CHECK(owner_calls==0&&!owner_locked&&strcmp(doors,"locked")!=0);
  return test_report("OBD handoff transport");
 }

@@ -741,6 +741,29 @@ void ble_read_rssi(void)
 	}
 }
 
+void ble_set_slow_link(bool slow)
+{
+	if (!is_connected) {
+		return;
+	}
+	esp_ble_conn_update_params_t params = {0};
+	memcpy(params.bda, s_remote_bda, sizeof(esp_bd_addr_t));
+	if (slow) {
+		params.min_int = 0x140;   // 400 ms
+		params.max_int = 0x190;   // 500 ms
+		params.latency = 2;       // 1.5 s worst case, under Apple's 2 s
+		params.timeout = 600;     // 6 s, above 3x the 1.5 s
+	} else {
+		params.min_int = 0x18;    // 30 ms
+		params.max_int = 0x28;    // 50 ms
+		params.latency = 0;
+		params.timeout = 400;     // 4 s
+	}
+	esp_err_t err = esp_ble_gap_update_conn_params(&params);
+	ESP_LOGI(GATTS_TABLE_TAG, "%s link requested: %s", slow ? "slow" : "responsive",
+	         esp_err_to_name(err));
+}
+
 static void ble_task(void *pvParameters)
 {
 	static xdev_buffer tx_buffer;

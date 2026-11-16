@@ -17,7 +17,7 @@
 MAIN := ../../main
 
 # firmware files tests compile against (copied into build/src)
-FW_FILES := approach.c approach.h autolock.c autolock.h unlockauth.h types.h hsm.c hsm.h precondition.c precondition.h sniff.c sniff.h clusternav.c clusternav.h bodycmd.c bodycmd.h obd_handoff_decode.c obd_handoff_decode.h
+FW_FILES := approach.c approach.h autolock.c autolock.h unlockauth.h types.h hsm.c hsm.h precondition.c precondition.h sniff.c sniff.h clusternav.c clusternav.h bodycmd.c bodycmd.h obd_handoff_decode.c obd_handoff_decode.h standby.c standby.h
 # firmware sources linked into every test binary (tests that #include a
 # source instead, for introspection, don't list it here)
 LINK_SRCS := build/src/hsm.c
@@ -54,7 +54,7 @@ build/test_obd_handoff_transport: test_obd_handoff_transport.c $(MAIN)/obd_hando
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< build/src/obd_handoff_decode.c $(LINK_SRCS)
 
 build/test_lock_approach_integration: test_lock_approach_integration.c $(FW_COPIES) $(HEADERS) | build/src
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< build/src/approach.c build/src/autolock.c $(LINK_SRCS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< build/src/approach.c build/src/autolock.c build/src/standby.c $(LINK_SRCS)
 
 build/test_%: test_%.c $(FW_COPIES) $(HEADERS) | build/src
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LINK_SRCS)

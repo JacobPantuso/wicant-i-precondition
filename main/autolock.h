@@ -45,6 +45,8 @@ void autolock_approach_unlocked(void);
 
 // Experimental direct OBD lease: real ON evidence is mandatory before OFF.
 bool autolock_can_handoff(void);
+// The OBD lease saw the owner lock the car after leaving it (obd_handoff.c).
+void autolock_owner_locked(void);
 void autolock_handoff_observation(bool on, bool blocked);
 
 // Explicit exit from direct ownership; a new genuine ON/OFF cycle is required.
