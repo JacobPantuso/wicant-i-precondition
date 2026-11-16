@@ -39,3 +39,6 @@ bool autolock_command(const char *args, char *response, size_t response_len);
 // XAL reports append ,1 for mandatory fresh OBD-off authorization.
 // ATXALP1: observed on, disarm. ATXALP0: observed off after on, arm.
 // Missing OBD data must never send P0. CAN silence alone cannot arm.
+
+// Called only after a fresh, accepted authenticated approach unlock.
+void autolock_approach_unlocked(void);

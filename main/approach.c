@@ -8,9 +8,15 @@
 #include "bodycmd.h"
 #include "precondition.h"
 #include "types.h"
+#include "autolock.h"
+#include "esp_log.h"
 
 #define NEAR_DBM (-65)
 #define NEAR_DWELL_US 2000000LL
+#define FAST_DWELL_US 1000000LL
+#define FAST_RISE_DB 8
+#define FAST_RETREAT_DB 4
+#define HISTORY_LEN 10
 #define EVENT_LIFE_US 5000000LL
 #define SAMPLE_LIFE_US 1500000LL
 static unsigned mode; // 0 off, 1 detect, 2 unlock. Volatile, reset at boot.
@@ -26,14 +32,59 @@ static uint32_t challenged_sequence;
 static bool challenge_issued;
 static uint32_t event_lock_requests;
 static QueueHandle_t *tx;
+static int window[3];
+static unsigned window_len;
+static struct { int value; int64_t at; } history[HISTORY_LEN];
+static unsigned history_len;
+static bool fast_candidate;
+static int candidate_peak;
+static int raw_signal;
+
+static void reset_detection(void) {
+    near_since = 0; sample_at = 0; window_len = 0; history_len = 0;
+    fast_candidate = false; challenge_issued = false;
+}
+
+static int median_sample(int value) {
+    if (window_len == 3) {
+        window[0] = window[1]; window[1] = window[2];
+        window[2] = value;
+    } else window[window_len++] = value;
+    int sorted[3]; memcpy(sorted, window, window_len * sizeof(int));
+    for (unsigned i = 1; i < window_len; i++) {
+        for (unsigned j = i; j > 0 && sorted[j - 1] > sorted[j]; j--) {
+            int tmp = sorted[j]; sorted[j] = sorted[j - 1]; sorted[j - 1] = tmp;
+        }
+    }
+    return sorted[window_len / 2];
+}
+
+static bool rising_from_away(int value, int64_t now) {
+    unsigned supporting = 0;
+    for (unsigned i = 0; i < history_len; i++) {
+        int64_t age = now - history[i].at;
+        if (age >= 1500000LL && age <= 4000000LL
+            && value - history[i].value >= FAST_RISE_DB) supporting++;
+    }
+    return supporting >= 2;
+}
+
+static void remember_signal(int value, int64_t now) {
+    if (history_len == HISTORY_LEN) {
+        memmove(history, history + 1, (HISTORY_LEN - 1) * sizeof(history[0]));
+        history_len--;
+    }
+    history[history_len].value = value;
+    history[history_len++].at = now;
+}
 
 void approach_set_tx_queue(QueueHandle_t *queue) { tx = queue; }
-void approach_departed(void) { departed = true; pending = false; near_since = 0; }
+void approach_departed(void) { departed = true; pending = false; reset_detection(); }
 void approach_reset_session(void) {
-    departed = false; pending = false; near_since = 0; power_ok = false; challenge_issued = false;
+    departed = false; pending = false; power_ok = false; reset_detection();
 }
 void approach_disconnected(void) {
-    pending = false; near_since = 0; sample_at = 0; power_ok = false; challenge_issued = false;
+    pending = false; power_ok = false; reset_detection();
 }
 static void push_event(void) {
     if (!tx || !*tx) return;
@@ -43,17 +94,36 @@ static void push_event(void) {
     xQueueSend(*tx, &buffer, 0);
 }
 void approach_sample(int value, bool parked_off, int64_t now) {
-    // The caller provides WiCAN's filtered signal. A gap cannot count as dwell.
-    if (sample_at == 0 || now - sample_at > SAMPLE_LIFE_US) near_since = 0;
-    sample_at = now; signal = value; power_ok = parked_off;
-    if (!parked_off || value < NEAR_DBM) {
-        pending = false; near_since = 0;
-        if (!parked_off) departed = false;
+    // Approach has its own responsive median. Departure keeps its existing
+    // median+EMA; the slow lock filter must not add delay to a return.
+    if (value < -127 || value >= 0) {
+        pending = false; power_ok = false; reset_detection(); return;
+    }
+    if (sample_at && now <= sample_at) return; // duplicate/out-of-order callback
+    if (sample_at && now - sample_at > SAMPLE_LIFE_US) {
+        pending = false; reset_detection();
+    }
+    sample_at = now; raw_signal = value; power_ok = parked_off;
+    signal = median_sample(value);
+    if (!parked_off || signal < NEAR_DBM || value < NEAR_DBM) {
+        pending = false; near_since = 0; fast_candidate = false;
+        if (!parked_off) { departed = false; reset_detection(); }
+        else remember_signal(signal, now);
         return;
     }
-    if (!mode || !departed) return;
-    if (!near_since) near_since = now;
-    if (now - near_since < NEAR_DWELL_US) return;
+    if (!mode || !departed) { remember_signal(signal, now); return; }
+    if (!near_since) {
+        near_since = now;
+        fast_candidate = rising_from_away(signal, now);
+        candidate_peak = signal;
+    }
+    if (signal > candidate_peak) candidate_peak = signal;
+    if (signal < candidate_peak - FAST_RETREAT_DB) fast_candidate = false;
+    remember_signal(signal, now);
+    int64_t dwell = fast_candidate ? FAST_DWELL_US : NEAR_DWELL_US;
+    if (window_len < 3 || now - near_since < dwell) return;
+    ESP_LOGI("approach", "qualified %s at %d dBm after %lld ms close",
+             fast_candidate ? "rising" : "steady", signal, (long long)((now - near_since) / 1000));
     departed = false; // One event per departure, even in detection-only mode.
     pending = mode == 2;
     event_at = now;
@@ -70,7 +140,7 @@ static bool eligible(void) {
     bodycmd_get_status(&status);
     return !car_in_ready_fresh() && status.lock_requests == event_lock_requests && mode == 2 && pending && power_ok && sample_at != 0
         && now - sample_at <= SAMPLE_LIFE_US && now - event_at <= EVENT_LIFE_US
-        && signal >= NEAR_DBM;
+        && signal >= NEAR_DBM && raw_signal >= NEAR_DBM;
 }
 bool approach_command(const char *args, char *response, size_t length) {
     if (!*args) {
@@ -99,6 +169,7 @@ bool approach_command(const char *args, char *response, size_t length) {
     bodycmd_get_status(&status);
     if (status.busy) return false;
     bodycmd_request_unlock();
+    autolock_approach_unlocked();
     snprintf(response, length, "OK");
     return true;
 }

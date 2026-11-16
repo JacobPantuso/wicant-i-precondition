@@ -7,6 +7,8 @@ static bool authenticated = true;
 static bool ready;
 bool car_in_ready_fresh(void) { return ready; }
 static unsigned unlock_count;
+static unsigned rearms;
+void autolock_approach_unlocked(void) { rearms++; }
 static unsigned notifications;
 static bodycmd_status_t body;
 void unlockauth_new_challenge(char *out) { memset(out, 'a', 32); out[32] = 0; }
@@ -28,7 +30,7 @@ static const char *mac = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 static void reset(void) {
     approach_reset_session(); approach_disconnected();
     mode = 0; sequence = 0; unlock_count = notifications = 0;
-    authenticated = true; fake_now = 1000000;
+    authenticated = true; ready = false; rearms = 0; fake_now = 1000000;
     memset(&body, 0, sizeof body);
     approach_set_tx_queue(&queue);
 }
@@ -53,7 +55,7 @@ int main(void) {
     reset(); arm(2); sample(-55, true, 2); sample(-80, true, 4); CHECK(!pending);
     sample(-55, true, 5); CHECK(pending && notifications == 1);
     CHECK(!answer()); // cannot reuse a challenge from a different event
-    challenge(); CHECK(answer() && unlock_count == 1); CHECK(!answer());
+    challenge(); CHECK(answer() && unlock_count == 1 && rearms == 1); CHECK(!answer());
     sample(-55, true, 20); CHECK(notifications == 1); // no repeated unlock in range
     reset(); arm(2); sample(-55, true, 5); challenge();
     fake_now += 2000000; CHECK(!answer() && !unlock_count); // stale RSSI
@@ -74,5 +76,49 @@ int main(void) {
     reset(); arm(2); sample(-55, true, 5); challenge(); ready = true; CHECK(!answer()); ready = false;
     reset(); arm(2); sample(-55, true, 1); fake_now += 10000000;
     sample(-55, true, 1); CHECK(!pending); // gaps do not count toward near dwell
+    // A rising approach can use the short close hold, with no EMA lag.
+    reset(); arm(2); sample(-88, true, 4);
+    sample(-74, true, 1); sample(-66, true, 1); sample(-63, true, 1);
+    CHECK(!pending);
+    sample(-61, true, 1); CHECK(fast_candidate && !pending);
+    int64_t close_at = fake_now;
+    sample(-60, true, 1); CHECK(!pending);
+    sample(-60, true, 1); CHECK(pending && fake_now - close_at == FAST_DWELL_US);
+    challenge(); CHECK(answer() && rearms == 1 && unlock_count == 1);
+
+    // A close reconnect without trajectory retains the full two-second hold.
+    reset(); arm(2); sample(-60, true, 4); CHECK(!pending && !fast_candidate);
+    sample(-60, true, 1); CHECK(pending);
+
+    // One/two strong spikes surrounded by weak readings cannot qualify.
+    reset(); arm(2); sample(-85, true, 4);
+    sample(-40, true, 1); sample(-85, true, 4); CHECK(!pending && !notifications);
+    sample(-40, true, 2); sample(-85, true, 4); CHECK(!pending && !notifications);
+
+    // Close jitter without a meaningful rise never selects the fast route.
+    reset(); arm(2); sample(-69, true, 4); sample(-64, true, 3);
+    CHECK(!fast_candidate && !pending);
+    sample(-64, true, 2); CHECK(!pending);
+    sample(-64, true, 1); CHECK(pending);
+
+    // Retreat cancels an issued challenge immediately, despite the median lag.
+    reset(); arm(2); sample(-90, true, 4); sample(-60, true, 4);
+    CHECK(pending); challenge(); sample(-80, true, 1); CHECK(!answer() && !rearms);
+
+    // Invalid/127 RSSI, gaps and duplicate timestamps cannot create dwell.
+    reset(); arm(2); sample(-90, true, 4); sample(-60, true, 2);
+    sample(127, true, 1); CHECK(!pending && !sample_at);
+    sample(-60, true, 4); CHECK(!pending);
+    sample(-60, true, 1); CHECK(pending);
+    reset(); arm(2); sample(-90, true, 4); sample(-60, true, 2);
+    fake_now += 2000000; sample(-60, true, 1);
+    CHECK(!pending && !fast_candidate);
+    for (int i = 0; i < 10; i++) approach_sample(-60, true, fake_now);
+    CHECK(!pending);
+
+    // Power invalidation consumes departure; fresh close readings cannot restore it.
+    reset(); arm(2); sample(-90, true, 4); sample(-60, true, 1);
+    sample(-60, false, 1); sample(-60, true, 10); CHECK(!pending && !notifications);
+
     return test_report("approach");
 }

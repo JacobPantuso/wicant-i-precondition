@@ -46,5 +46,17 @@ int main(void) {
     reset(); command("p1"); connected = false; command("p0");
     fake_now += 6000000; autolock_tick(); CHECK(requests == 1);
     reset(); off_after_drive(); fake_ready = true; autolock_tick(); CHECK(!armed && !parked);
+    // Accepted approach unlock rearms without crossing the old -62 line.
+    reset(); off_after_drive(); armed = false;
+    autolock_approach_unlocked(); CHECK(armed && !smoothed_valid);
+    for (int i = 0; i < 5; i++) { fake_now += 500000; sample(-63, fake_now); }
+    CHECK(armed && requests == 0);
+    for (int i = 0; i < 12; i++) { fake_now += 500000; sample(-95, fake_now); }
+    CHECK(requests == 1);
+    reset(); autolock_approach_unlocked(); CHECK(!armed); // no parked/off authorization
+    reset(); off_after_drive(); armed = false; fake_ready = true;
+    autolock_approach_unlocked(); CHECK(!armed);
+    reset(); off_after_drive(); armed = false; enabled = false;
+    autolock_approach_unlocked(); CHECK(!armed);
     return test_report("autolock");
 }

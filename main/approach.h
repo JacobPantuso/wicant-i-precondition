@@ -10,5 +10,6 @@ void approach_set_tx_queue(QueueHandle_t *queue);
 void approach_departed(void);
 void approach_reset_session(void);
 void approach_disconnected(void);
+// Raw, timestamped RSSI; this module owns its responsive approach filter.
 void approach_sample(int signal, bool parked_off, int64_t now);
 bool approach_command(const char *args, char *response, size_t length);

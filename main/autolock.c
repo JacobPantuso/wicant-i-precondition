@@ -249,6 +249,18 @@ static void fire(const char *why)
     ESP_LOGI(TAG, "firing walk-away lock: %s", why);
 }
 
+// A fresh authenticated approach unlock establishes a return, even when
+// the separate walk-away filter has not crossed its stronger rearm threshold.
+void autolock_approach_unlocked(void)
+{
+    if (!enabled || !parked || !obd_off || car_in_ready_fresh()) return;
+    armed = true;
+    armed_at_us = esp_timer_get_time();
+    hold_until_us = 0;
+    reset_signal();
+    ESP_LOGI(TAG, "authenticated return; observing the next departure");
+}
+
 // One link RSSI reading while parked: smooth it, then lock when armed and
 // the phone is away, or arm again when it's back after a lock.
 static void sample(int rssi, int64_t now)
@@ -281,7 +293,7 @@ static void sample(int rssi, int64_t now)
     smoothed = smoothed_valid ? smoothed + SMOOTHING * (median - smoothed) : median;
     smoothed_valid = true;
 
-    approach_sample((int)smoothed, parked && obd_off && !car_in_ready_fresh(), now);
+    approach_sample(rssi, parked && obd_off && !car_in_ready_fresh(), now);
     if (armed) {
         away_since = smoothed <= threshold ? (away_since ? away_since : now) : 0;
         quick_since = smoothed <= threshold - QUICK_MARGIN_DB ? (quick_since ? quick_since : now) : 0;
