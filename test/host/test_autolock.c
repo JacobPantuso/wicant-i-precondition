@@ -2,6 +2,11 @@
 #include <string.h>
 #include "test_support.h"
 #include "autolock.c"
+void approach_set_tx_queue(QueueHandle_t *q) {}
+void approach_departed(void) {}
+void approach_reset_session(void) {}
+void approach_disconnected(void) {}
+void approach_sample(int s, bool p, int64_t n) {}
 static bool fake_ready;
 static int requests;
 static bodycmd_status_t fake_body;

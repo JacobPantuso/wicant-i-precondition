@@ -26,6 +26,7 @@
 // means "lock sequence on the bus", the ATXLK1 semantics the app trusts.
 
 #include "autolock.h"
+#include "approach.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -158,6 +159,7 @@ void autolock_init(void)
 void autolock_set_tx_queue(QueueHandle_t *queue)
 {
     tx_queue = queue;
+    approach_set_tx_queue(queue);
 }
 
 static void report(char *response, size_t response_len)
@@ -219,6 +221,7 @@ void autolock_note_connected(void)
 void autolock_note_disconnected(void)
 {
     connected = false;
+    approach_disconnected();
     reset_signal();
     if (!enabled || !armed || !unlockauth_has_key()
             || hold_until_us != 0 || verify_until_us != 0) {
@@ -278,6 +281,7 @@ static void sample(int rssi, int64_t now)
     smoothed = smoothed_valid ? smoothed + SMOOTHING * (median - smoothed) : median;
     smoothed_valid = true;
 
+    approach_sample((int)smoothed, parked && obd_off && !car_in_ready_fresh(), now);
     if (armed) {
         away_since = smoothed <= threshold ? (away_since ? away_since : now) : 0;
         quick_since = smoothed <= threshold - QUICK_MARGIN_DB ? (quick_since ? quick_since : now) : 0;
@@ -312,6 +316,7 @@ void autolock_tick(void)
     // never moves; say so once rather than on every tick.
     bool ready = car_in_ready_fresh();
     if (ready) {
+        approach_reset_session();
         ready_seen = true;
         obd_off = false;
         parked = false;
@@ -365,6 +370,7 @@ void autolock_tick(void)
         bodycmd_get_status(&status);
         if (status.locks_completed > locks_at_request) {
             last = RESULT_LOCKED;
+            approach_departed();
             count++;
             armed = false;   // until the phone comes back to the car
             verify_until_us = 0;
@@ -392,6 +398,7 @@ bool autolock_command(const char *args, char *response, size_t response_len)
     }
     if (args[0] == 'p' && (args[1] == '0' || args[1] == '1') && args[2] == 0) {
         if (args[1] == '1') {
+            approach_reset_session();
             ready_seen = true;
             obd_off = false;
             parked = false;

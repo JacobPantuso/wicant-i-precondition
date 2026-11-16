@@ -1,0 +1,14 @@
+#pragma once
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
+// Experimental branch only. No standing unlock permission is stored.
+void approach_set_tx_queue(QueueHandle_t *queue);
+void approach_departed(void);
+void approach_reset_session(void);
+void approach_disconnected(void);
+void approach_sample(int signal, bool parked_off, int64_t now);
+bool approach_command(const char *args, char *response, size_t length);

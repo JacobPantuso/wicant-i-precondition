@@ -82,7 +82,8 @@ bool unlockauth_check(unlockauth_purpose_t purpose, const uint8_t mac[UNLOCKAUTH
     if (!live || !s_has_key) {
         return false;
     }
-    const char *label = purpose == UNLOCKAUTH_UNLOCK ? "numen-unlock" : "numen-verify";
+    const char *label = purpose == UNLOCKAUTH_UNLOCK ? "numen-unlock"
+        : purpose == UNLOCKAUTH_APPROACH ? "numen-approach" : "numen-verify";
     size_t label_len = strlen(label);
     uint8_t message[LABEL_MAX + UNLOCKAUTH_NONCE_LEN];
     memcpy(message, label, label_len);

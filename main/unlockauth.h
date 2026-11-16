@@ -20,6 +20,7 @@
 
 typedef enum {
     UNLOCKAUTH_UNLOCK = 0,   // label "numen-unlock": sends the unlock sequence
+    UNLOCKAUTH_APPROACH,     // label numen-approach; one current near event
     UNLOCKAUTH_VERIFY,       // label "numen-verify": proves the key, unlocks nothing
 } unlockauth_purpose_t;
 
