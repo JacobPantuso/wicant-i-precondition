@@ -283,6 +283,13 @@ bool standby_command(const char *args, char *response, size_t response_len)
         snprintf(response, response_len, "OK");
         return true;
     }
+    if (args[0] == 'x' && args[1] == 0) {
+        if (state == STANDBY_PARKED) {
+            go(STANDBY_ACTIVE, "resumed");
+        }
+        snprintf(response, response_len, "OK");
+        return true;
+    }
     if (args[0] == 'v') {
         char *end = NULL;
         long value = strtol(&args[1], &end, 10);

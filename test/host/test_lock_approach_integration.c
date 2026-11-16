@@ -233,6 +233,15 @@ int main(void) {
     CHECK(standby_state() == STANDBY_PARKED);
     PK("e0"); advance(80); CHECK(standby_state() == STANDBY_ACTIVE && applied_state == STANDBY_ACTIVE);
 
+    // The owner resuming the phone's OBD adapter leaves standby, no lease.
+    PK("e1"); command("p1"); start_parked_cycle(); connected(); radio_signal = -95; advance(8000);
+    standby_note_lease_started();
+    CHECK(standby_state() == STANDBY_PARKED);
+    PK("x"); advance(80);
+    CHECK(standby_state() == STANDBY_ACTIVE && applied_state == STANDBY_ACTIVE && !autolock_can_handoff());
+    PK(""); CHECK(strncmp(xpk, "XPK:1,active,resumed,", 21) == 0);
+    PK("x");   // nothing to leave: still OK
+
     // Command validation.
     CHECK(!standby_command("v11000", xpk, sizeof xpk));
     CHECK(!standby_command("e2", xpk, sizeof xpk));

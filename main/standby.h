@@ -12,11 +12,14 @@
 //                state: active | parked | protect; vbat -1 = no reading
 //   ATXPKE1|0    standby on | off. Volatile, off at boot, like ATXAUm:
 //                the app reapplies it on every connect.
-//   ATXPKH1|0    the phone is at Home and idle | not. Parked only: slows
-//                RSSI sampling and asks for a slow link. Grants nothing.
-//                Any disconnect clears it.
+//   ATXPKH1|0    the car is parked inside the owner's Home zone, where the
+//                app never approach-unlocks | not. Parked only: slows RSSI
+//                sampling and asks for a slow link. Grants nothing. Any
+//                disconnect clears it; the app resends it on connect.
 //   ATXPKP1|0    power management in standby on | off (A/B measurement)
 //   ATXPKV<mV>   battery floor, 11500-12800 (volatile; default 12200)
+//   ATXPKX       leave parked standby now: the owner asked the phone to
+//                resume its OBD adapter. Grants no lease; the next drive does.
 //   $XPK:...     pushed on every state change while the phone is connected
 #pragma once
 
