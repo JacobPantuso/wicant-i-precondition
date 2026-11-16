@@ -52,6 +52,7 @@
 #include "dev_status.h"
 #include "hw_config.h"
 #include "autolock.h"
+#include "obd_handoff.h"
 #include "ble_ota.h"
 
 /* Attributes State Machine */
@@ -404,9 +405,10 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 {
     ESP_LOGV(GATTS_TABLE_TAG, "GAP_EVT, event %d\n", event);
 
+    obd_handoff_gap(event, param);
     switch (event) {
     case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
-        if (param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+        if (is_connected && memcmp(param->read_rssi_cmpl.remote_addr,s_remote_bda,6)==0 && param->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS) {
             autolock_note_rssi(param->read_rssi_cmpl.rssi);
         }
         break;
@@ -441,7 +443,8 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     case ESP_GAP_BLE_OOB_REQ_EVT: {
         ESP_LOGI(GATTS_TABLE_TAG, "ESP_GAP_BLE_OOB_REQ_EVT");
         uint8_t tk[16] = {1}; //If you paired with OOB, both devices need to use the same tk
-        esp_ble_oob_req_reply(param->ble_security.ble_req.bd_addr, tk, sizeof(tk));
+        if (is_connected && memcmp(param->ble_security.ble_req.bd_addr,s_remote_bda,6)==0)
+            esp_ble_oob_req_reply(param->ble_security.ble_req.bd_addr, tk, sizeof(tk));
         break;
     }
     case ESP_GAP_BLE_LOCAL_IR_EVT:                               /* BLE local IR event */
@@ -453,13 +456,13 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     case ESP_GAP_BLE_NC_REQ_EVT:
         /* The app will receive this evt when the IO has DisplayYesNO capability and the peer device IO also has DisplayYesNo capability.
         show the passkey number to the user to confirm it with the number displayed by peer device. */
-        esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+        esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, is_connected && memcmp(param->ble_security.ble_req.bd_addr,s_remote_bda,6)==0);
         ESP_LOGI(GATTS_TABLE_TAG, "ESP_GAP_BLE_NC_REQ_EVT, the passkey Notify number:%" PRIu32, param->ble_security.key_notif.passkey);
         break;
     case ESP_GAP_BLE_SEC_REQ_EVT:
         /* send the positive(true) security response to the peer device to accept the security request.
         If not accept the security request, should send the security response with negative(false) accept value*/
-        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, is_connected && memcmp(param->ble_security.ble_req.bd_addr,s_remote_bda,6)==0);
         break;
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:  ///the app will receive this evt when the IO  has Output capability and the peer device IO has Input capability.
         ///show the passkey number to the user to input it in the peer device.
@@ -978,6 +981,7 @@ void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t conn
 		ESP_LOGE(GATTS_TABLE_TAG, "gap register error, error code = %x", ret);
 		return;
 	}
+	obd_handoff_init();
 	ret = esp_ble_gatts_app_register(ESP_HEART_RATE_APP_ID);
 	if (ret){
 		ESP_LOGE(GATTS_TABLE_TAG, "gatts app register error, error code = %x", ret);
@@ -1043,6 +1047,7 @@ void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t conn
 
 void ble_disable(void)
 {
+    if (!obd_handoff_shutdown()) return;
 	if(adv_retry_timer != NULL)
 	{
 		esp_timer_stop(adv_retry_timer);

@@ -42,6 +42,12 @@
 #include "types.h"
 #include "unlockauth.h"
 
+// Weak defaults preserve host tests and builds without the optional BLE client.
+__attribute__((weak)) bool obd_handoff_blocks(void) { return false; }
+__attribute__((weak)) bool obd_handoff_managed(void) { return false; }
+__attribute__((weak)) void obd_handoff_tick(void) {}
+__attribute__((weak)) void obd_handoff_note_on(void) {}
+
 #define NVS_NAMESPACE   "autolock"
 #define NVS_ENABLED     "en"
 #define NVS_COUNT       "count"
@@ -207,7 +213,7 @@ static void reset_signal(void)
 
 static bool app_holds(void)
 {
-    return hold_until_ms != 0; // Only a fresh clear reading releases a hold.
+    return hold_until_ms != 0 || obd_handoff_blocks(); // Direct ownership requires a fresh validated read.
 }
 
 void autolock_note_connected(void)
@@ -246,6 +252,7 @@ void autolock_note_rssi(int rssi)
 
 static void fire(const char *why)
 {
+    if (app_holds()) return; // Guard both RSSI and disconnect paths at dispatch.
     bodycmd_status_t status;
     bodycmd_get_status(&status);
     if (status.busy) return;
@@ -329,6 +336,7 @@ static void sample(int rssi, int64_t now)
 void autolock_tick(void)
 {
     int64_t now = esp_timer_get_time();
+    obd_handoff_tick();
 
     // Arming from READY edges. If 0x038 never reaches this bus the flag
     // never moves; say so once rather than on every tick.
@@ -415,7 +423,41 @@ void autolock_tick(void)
     }
 }
 
+static bool autolock_apply_command(const char *,char *,size_t);
+
+void autolock_handoff_invalidate(void)
+{
+    armed=false;obd_off=false;parked=false;ready_seen=false;
+    hold_until_ms=1;hold_until_us=0;verify_until_us=0;
+    bodycmd_cancel_local_lock();reset_signal();approach_reset_session();
+}
+
+bool autolock_can_handoff(void)
+{
+    return enabled && (ready_seen || (parked && obd_off));
+}
+
+void autolock_handoff_observation(bool on, bool blocked)
+{
+    // Called only for the selected adapter's complete, VIN-validated response.
+    char response[48];
+    autolock_apply_command(on ? "p1" : "p0", response, sizeof(response));
+    autolock_apply_command(blocked ? "b1" : "b0", response, sizeof(response));
+}
+
 bool autolock_command(const char *args, char *response, size_t response_len)
+{
+    // Once direct ownership begins, app OFF/clear cannot override a missing,
+    // stale or blocked direct observation. Fresh app ON remains a veto.
+    if (!strcmp(args, "p1")) obd_handoff_note_on();
+    if (obd_handoff_managed() && (!strcmp(args,"p0") || !strcmp(args,"b0"))) {
+        snprintf(response,response_len,"OK");
+        return true;
+    }
+    return autolock_apply_command(args,response,response_len);
+}
+
+static bool autolock_apply_command(const char *args, char *response, size_t response_len)
 {
     if (args[0] == 0) {
         report(response, response_len);

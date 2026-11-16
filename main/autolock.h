@@ -42,3 +42,10 @@ bool autolock_command(const char *args, char *response, size_t response_len);
 
 // Called only after a fresh, accepted authenticated approach unlock.
 void autolock_approach_unlocked(void);
+
+// Experimental direct OBD lease: real ON evidence is mandatory before OFF.
+bool autolock_can_handoff(void);
+void autolock_handoff_observation(bool on, bool blocked);
+
+// Explicit exit from direct ownership; a new genuine ON/OFF cycle is required.
+void autolock_handoff_invalidate(void);
