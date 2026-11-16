@@ -321,6 +321,7 @@ void autolock_tick(void)
         obd_off = false;
         parked = false;
         armed = false;
+        bodycmd_cancel_local_lock();
         hold_until_us = 0;
         reset_signal();
     }
@@ -403,6 +404,7 @@ bool autolock_command(const char *args, char *response, size_t response_len)
             obd_off = false;
             parked = false;
             armed = false;
+            bodycmd_cancel_local_lock();
             hold_until_us = 0;
             reset_signal();
         } else if (!car_in_ready_fresh() && ready_seen && !obd_off) {
@@ -438,6 +440,7 @@ bool autolock_command(const char *args, char *response, size_t response_len)
             }
         }
         hold_until_ms = until;
+        if (until != 0) bodycmd_cancel_local_lock();
         snprintf(response, response_len, "OK");
         return true;
     }
@@ -452,6 +455,7 @@ bool autolock_command(const char *args, char *response, size_t response_len)
     enabled = on;
     if (!on) {
         armed = false;
+        bodycmd_cancel_local_lock();
         hold_until_us = 0;
     }
     persist();

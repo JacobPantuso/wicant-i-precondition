@@ -392,8 +392,8 @@ static void can_rx_task(void *pvParameters)
             precondition_push_status(ble_connected());
             sniff_tick(precondition_tick_last, ble_connected());
             clusternav_tick(precondition_tick_last, ble_connected());
-            bodycmd_tick(ble_connected());
             autolock_tick();
+            bodycmd_tick(ble_connected());
         }
         // every pass, not the 40 ms tick: multi-frame messages go out ~5 ms apart
         clusternav_poll(esp_timer_get_time());

@@ -15,6 +15,7 @@ bool unlockauth_has_key(void) { return true; }
 void ble_read_rssi(void) {}
 void bodycmd_get_status(bodycmd_status_t *s) { *s = fake_body; }
 void bodycmd_request_lock_local(void) { requests++; }
+void bodycmd_cancel_local_lock(void) {}
 BaseType_t xQueueSend(QueueHandle_t q, const void *p, TickType_t t) { return 1; }
 static void command(const char *s) { char out[64]; CHECK(autolock_command(s, out, sizeof out)); }
 static void reset(void) {

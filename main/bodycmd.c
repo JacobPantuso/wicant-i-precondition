@@ -157,6 +157,11 @@ void bodycmd_request_lock_local(void)
     atomic_fetch_add(&lock_requests, 1);
 }
 
+void bodycmd_cancel_local_lock(void)
+{
+    atomic_store(&pending_lock_local, false);
+}
+
 void bodycmd_request_unlock(void)
 {
     atomic_store(&pending_lock, false);

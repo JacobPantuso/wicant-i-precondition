@@ -52,3 +52,6 @@ void bodycmd_request_unlock(void);
 void bodycmd_tick(bool link_up);
 
 void bodycmd_get_status(bodycmd_status_t *out);
+
+// Cancel a device-originated lock that has not started its CAN burst.
+void bodycmd_cancel_local_lock(void);
