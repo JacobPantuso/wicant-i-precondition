@@ -9,6 +9,7 @@ void approach_disconnected(void) {}
 static bool reconnect_permitted;
 bool approach_connected(void) { return reconnect_permitted; }
 void approach_sample(int s, bool p, int64_t n) {}
+void approach_set_sample_period(int64_t us) {}
 // Standby has its own suite (test_standby.c); here it always allows a lease.
 void standby_set_tx_queue(QueueHandle_t *q) {}
 void standby_note_drive(void) {}
@@ -80,6 +81,11 @@ int main(void) {
     CHECK(lock_sample_next_us - fake_now == RSSI_PERIOD_US);
     fake_now += 120000; autolock_note_rssi(-62); autolock_tick();
     CHECK(lock_sample_next_us - fake_now == RSSI_PERIOD_US - 120000);
-    fake_now += 3000000; autolock_tick(); CHECK(rssi_next_us - fake_now == RSSI_PERIOD_US);
+    // After the probe, a returning phone is read every 250 ms for a minute.
+    fake_now += 3000000; autolock_tick(); CHECK(rssi_next_us - fake_now == RETURN_PERIOD_US);
+    fake_now += RETURN_WINDOW_US; autolock_tick(); CHECK(rssi_next_us - fake_now == RSSI_PERIOD_US);
+    // A reconnect with no departure behind it keeps the normal cadence.
+    reset(); off_after_drive(); reconnect_permitted = false;
+    autolock_note_connected(); autolock_tick(); CHECK(rssi_next_us - fake_now == RSSI_PERIOD_US);
     return test_report("autolock");
 }

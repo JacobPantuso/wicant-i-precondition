@@ -16,18 +16,35 @@
 #define FAST_DWELL_US 1000000LL
 #define FAST_RISE_DB 8
 #define FAST_RETREAT_DB 4
+// A clear walk back may qualify before NEAR_DBM: the median must have climbed
+// RISING_GAIN_DB from a floor that was really away (FAR_DBM or weaker), and
+// still be climbing (rising_from_away). Phone-in-the-house jitter around
+// -80 never has a floor that low, and keeps the -65 dBm steady rule.
+#define RISING_DBM (-75)
+#define RISING_GAIN_DB 15
+#define FAR_DBM (-85)
+// One raw reading may sit this far under the event's floor without voiding an
+// issued challenge (pocket/body dips); a real retreat goes further.
+#define RAW_DIP_DB 10
 #define HISTORY_LEN 10
 #define RECONNECT_LIFE_US 3000000LL
 #define RECONNECT_CONFIRM_US 100000LL
 #define EVENT_LIFE_US 5000000LL
 #define SAMPLE_LIFE_US 1500000LL
+#define DEFAULT_PERIOD_US 500000LL
 static unsigned mode; // 0 off, 1 detect, 2 unlock. Volatile, reset at boot.
 static bool departed;
 static bool pending;
 static uint32_t sequence;
 static int signal;
-static int64_t near_since;
+static int64_t near_since;   // median at or above the event floor in play
+static int64_t close_since;  // median at or above NEAR_DBM
 static int64_t sample_at;
+static int64_t period_us = DEFAULT_PERIOD_US;
+static int floor_signal;     // weakest median since departure or connect
+static bool floor_valid;
+static int event_floor = NEAR_DBM;
+static int64_t connected_at;
 static int64_t event_at;
 static bool power_ok;
 static uint32_t challenged_sequence;
@@ -45,9 +62,29 @@ static int64_t reconnect_until;
 static unsigned reconnect_close_samples;
 
 static void reset_detection(void) {
-    near_since = 0; sample_at = 0; window_len = 0; history_len = 0;
+    near_since = 0; close_since = 0; sample_at = 0; window_len = 0; history_len = 0;
     fast_candidate = false; challenge_issued = false;
     reconnect_until = 0; reconnect_close_samples = 0;
+}
+
+// The away level is kept across sample gaps: a slow or interrupted sampling
+// run must not forget that the phone started far away.
+static void reset_floor(void) { floor_valid = false; }
+
+// Readings further apart than this are a gap, not one continuous approach.
+static int64_t sample_life_us(void) {
+    int64_t life = 3 * period_us;
+    return life > SAMPLE_LIFE_US ? life : SAMPLE_LIFE_US;
+}
+
+// How old the last reading may be when an unlock is answered.
+static int64_t fresh_life_us(void) {
+    int64_t life = period_us + 500000LL;
+    return life > SAMPLE_LIFE_US ? life : SAMPLE_LIFE_US;
+}
+
+void approach_set_sample_period(int64_t us) {
+    period_us = us > 0 ? us : DEFAULT_PERIOD_US;
 }
 
 static int median_sample(int value) {
@@ -84,15 +121,19 @@ static void remember_signal(int value, int64_t now) {
 }
 
 void approach_set_tx_queue(QueueHandle_t *queue) { tx = queue; }
-void approach_departed(void) { departed = true; pending = false; reset_detection(); }
+void approach_departed(void) {
+    departed = true; pending = false; reset_detection(); reset_floor();
+}
 void approach_reset_session(void) {
-    departed = false; pending = false; power_ok = false; reset_detection();
+    departed = false; pending = false; power_ok = false; reset_detection(); reset_floor();
 }
 bool approach_connected(void) {
     pending = false; power_ok = false;
-    reset_detection();
+    reset_detection(); reset_floor();
     if (!departed || mode == 0) return false;
-    reconnect_until = esp_timer_get_time() + RECONNECT_LIFE_US;
+    connected_at = esp_timer_get_time();
+    reconnect_until = connected_at + RECONNECT_LIFE_US;
+    ESP_LOGI("approach", "phone back after a departure; watching for the return");
     return true;
 }
 void approach_disconnected(void) {
@@ -112,16 +153,30 @@ void approach_sample(int value, bool parked_off, int64_t now) {
         pending = false; power_ok = false; reset_detection(); return;
     }
     if (sample_at && now <= sample_at) return; // duplicate/out-of-order callback
-    if (sample_at && now - sample_at > SAMPLE_LIFE_US) {
+    if (sample_at && now - sample_at > sample_life_us()) {
         pending = false; reset_detection();
     }
     sample_at = now; raw_signal = value; power_ok = parked_off;
     signal = median_sample(value);
-    if (!parked_off || signal < NEAR_DBM || value < NEAR_DBM) {
-        pending = false; near_since = 0; fast_candidate = false;
-        reconnect_close_samples = 0;
-        if (!parked_off) { departed = false; reset_detection(); }
-        else remember_signal(signal, now);
+    if (!parked_off) {
+        pending = false; departed = false; reset_detection(); reset_floor();
+        return;
+    }
+    if (!floor_valid || signal < floor_signal) { floor_signal = signal; floor_valid = true; }
+    // An issued event lapses on a retreat: the median under its floor, or one
+    // raw reading well under it. A single pocket dip does not.
+    if (pending && (signal < event_floor || value < event_floor - RAW_DIP_DB)) pending = false;
+
+    // The reconnect shortcut has no hold, so every reading it counts must be
+    // close on its own, not only the median.
+    if (value < NEAR_DBM) reconnect_close_samples = 0;
+    bool close = signal >= NEAR_DBM;
+    bool climbing = signal >= RISING_DBM && floor_valid && floor_signal <= FAR_DBM
+        && signal - floor_signal >= RISING_GAIN_DB;
+    if (!close) close_since = 0;
+    if (!close && !climbing) {
+        near_since = 0; fast_candidate = false; reconnect_close_samples = 0;
+        remember_signal(signal, now);
         return;
     }
     if (!mode || !departed) { remember_signal(signal, now); return; }
@@ -129,19 +184,25 @@ void approach_sample(int value, bool parked_off, int64_t now) {
         near_since = now;
         fast_candidate = rising_from_away(signal, now);
         candidate_peak = signal;
+        ESP_LOGI("approach", "candidate at %d dBm (raw %d), floor %d, %s",
+                 signal, value, floor_signal, fast_candidate ? "rising" : "not rising");
     }
+    if (close && !close_since) close_since = now;
     if (signal > candidate_peak) candidate_peak = signal;
     if (signal < candidate_peak - FAST_RETREAT_DB) fast_candidate = false;
     remember_signal(signal, now);
-    reconnect_close_samples++;
-    bool reconnect_close = reconnect_until && now <= reconnect_until
+    if (close && value >= NEAR_DBM) reconnect_close_samples++;
+    bool reconnect_close = close && reconnect_until && now <= reconnect_until
         && reconnect_close_samples >= 2 && window_len >= 2
         && now - near_since >= RECONNECT_CONFIRM_US;
-    int64_t dwell = fast_candidate ? FAST_DWELL_US : NEAR_DWELL_US;
-    if (!reconnect_close && (window_len < 3 || now - near_since < dwell)) return;
-    ESP_LOGI("approach", "qualified %s at %d dBm after %lld ms close",
-             reconnect_close ? "reconnect" : fast_candidate ? "rising" : "steady",
-             signal, (long long)((now - near_since) / 1000));
+    bool rising = fast_candidate && window_len >= 3 && now - near_since >= FAST_DWELL_US;
+    bool steady = close_since && window_len >= 3 && now - close_since >= NEAR_DWELL_US;
+    if (!reconnect_close && !rising && !steady) return;
+    event_floor = close ? NEAR_DBM : RISING_DBM;
+    ESP_LOGI("approach", "qualified %s at %d dBm after %lld ms; floor %d, peak %d, %lld ms since connect",
+             reconnect_close ? "reconnect" : rising ? "rising" : "steady",
+             signal, (long long)((now - near_since) / 1000), floor_signal, candidate_peak,
+             connected_at ? (long long)((now - connected_at) / 1000) : -1LL);
     departed = false; // One event per departure, even in detection-only mode.
     pending = mode == 2;
     event_at = now;
@@ -157,8 +218,8 @@ static bool eligible(void) {
     bodycmd_status_t status;
     bodycmd_get_status(&status);
     return !car_in_ready_fresh() && status.lock_requests == event_lock_requests && mode == 2 && pending && power_ok && sample_at != 0
-        && now - sample_at <= SAMPLE_LIFE_US && now - event_at <= EVENT_LIFE_US
-        && signal >= NEAR_DBM && raw_signal >= NEAR_DBM;
+        && now - sample_at <= fresh_life_us() && now - event_at <= EVENT_LIFE_US
+        && signal >= event_floor && raw_signal >= event_floor - RAW_DIP_DB;
 }
 bool approach_command(const char *args, char *response, size_t length) {
     if (!*args) {

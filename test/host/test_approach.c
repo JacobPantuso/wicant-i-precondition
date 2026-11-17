@@ -78,11 +78,11 @@ int main(void) {
     sample(-55, true, 1); CHECK(!pending); // gaps do not count toward near dwell
     // A rising approach can use the short close hold, with no EMA lag.
     reset(); arm(2); sample(-88, true, 4);
-    sample(-74, true, 1); sample(-66, true, 1); sample(-63, true, 1);
-    CHECK(!pending);
-    sample(-61, true, 1); CHECK(fast_candidate && !pending);
+    sample(-74, true, 1); sample(-66, true, 1); CHECK(!near_since);
+    // A median of -66 is 22 dB over a -88 floor: the rising band opens it.
+    sample(-63, true, 1); CHECK(fast_candidate && near_since == fake_now && !pending);
     int64_t close_at = fake_now;
-    sample(-60, true, 1); CHECK(!pending);
+    sample(-61, true, 1); CHECK(!pending);
     sample(-60, true, 1); CHECK(pending && fake_now - close_at == FAST_DWELL_US);
     challenge(); CHECK(answer() && rearms == 1 && unlock_count == 1);
 
@@ -144,6 +144,51 @@ int main(void) {
     fake_now += 120000; approach_sample(-60, false, fake_now);
     fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(!pending && !departed);
     reset(); arm(0); CHECK(!approach_connected());
+
+    // Today's miss: a walk back from the edge of range with pocket jitter.
+    // The median climbs well over the far floor and qualifies in the rising
+    // band, before -65 dBm, even though raw readings dip under it.
+    reset(); arm(2); approach_disconnected(); CHECK(approach_connected());
+    fake_now += RECONNECT_LIFE_US + 1;
+    approach_set_sample_period(250000);
+    {
+        static const int walk[] = { -96, -95, -93, -94, -90, -91, -88, -86, -88, -84,
+                                    -82, -84, -80, -78, -81, -76, -74, -79, -72, -71,
+                                    -77, -70, -69 };
+        int fired_at = -1;
+        for (int i = 0; i < (int)(sizeof walk / sizeof walk[0]); i++) {
+            fake_now += 250000; approach_sample(walk[i], true, fake_now);
+            if (pending && fired_at < 0) fired_at = i;
+        }
+        CHECK(fired_at >= 0 && signal < NEAR_DBM && event_floor == RISING_DBM);
+        challenge(); CHECK(answer() && unlock_count == 1);
+    }
+    approach_set_sample_period(500000);
+
+    // One raw dip under -65 no longer restarts the steady two-second hold.
+    reset(); arm(2); sample(-60, true, 3);
+    sample(-70, true, 1); CHECK(!pending && close_since);
+    sample(-60, true, 1); CHECK(pending);
+
+    // ...and a pocket dip does not void an issued challenge, a retreat does.
+    reset(); arm(2); sample(-60, true, 5); CHECK(pending);
+    challenge(); sample(-72, true, 1); CHECK(answer() && unlock_count == 1);
+
+    // Jitter in the house never had a far floor: no rising-band event.
+    reset(); arm(2);
+    for (int i = 0; i < 40; i++) sample(i % 3 == 0 ? -82 : i % 3 == 1 ? -72 : -76, true, 1);
+    CHECK(!pending && !notifications);
+
+    // A rising-band event lapses once the median falls back under -75.
+    reset(); arm(2); sample(-95, true, 6); sample(-78, true, 2); sample(-72, true, 4);
+    CHECK(pending && event_floor == RISING_DBM);
+    sample(-80, true, 2); challenge(); CHECK(!answer());
+
+    // At Home, standby reads every 2 s: those are not gaps and can qualify.
+    reset(); arm(2); approach_set_sample_period(2000000);
+    for (int i = 0; i < 4; i++) { fake_now += 2000000; approach_sample(-60, true, fake_now); }
+    CHECK(pending);
+    approach_set_sample_period(500000);
 
     return test_report("approach");
 }

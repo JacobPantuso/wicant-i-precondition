@@ -65,6 +65,10 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 #define LOCK_BURST_FRAMES 11                      // bodycmd: 4 prepare + 4 execute + 3 finish
 
 #define RSSI_PERIOD_US  (500LL * 1000)
+// After a departure, a phone that reconnects is nearly always its owner
+// walking back: read faster for a minute, whatever standby would choose.
+#define RETURN_PERIOD_US (250LL * 1000)
+#define RETURN_WINDOW_US (60LL * 1000 * 1000)
 #define SIGNAL_HOLD_US  (3LL * 1000 * 1000)
 #define QUICK_HOLD_US   (1LL * 1000 * 1000)
 #define QUICK_MARGIN_DB 6
@@ -102,6 +106,7 @@ static int8_t threshold = -85;
 static bool connected;
 static int64_t rssi_next_us;
 static int64_t reconnect_probe_until_us;
+static int64_t return_fast_until_us;
 static int64_t lock_sample_next_us;
 static volatile int latest_rssi;   // written by the BTC task
 static volatile uint32_t rssi_seq;
@@ -230,7 +235,12 @@ void autolock_note_connected(void)
     disconnected_at_us = 0;
     standby_note_connected();
     reset_signal();
-    reconnect_probe_until_us = approach_connected() ? esp_timer_get_time() + 3000000LL : 0;
+    {
+        int64_t at = esp_timer_get_time();
+        bool returning = approach_connected();
+        reconnect_probe_until_us = returning ? at + 3000000LL : 0;
+        return_fast_until_us = returning ? at + RETURN_WINDOW_US : 0;
+    }
     rssi_next_us = 0;
     lock_sample_next_us = 0;
     rssi_seq_seen = rssi_seq; // no RSSI from the previous link can authorize return
@@ -379,9 +389,13 @@ void autolock_tick(void)
     // waiting to see the phone come back.
     if (enabled && parked && obd_off && !ready && connected) {
         if (now >= rssi_next_us) {
-            // Parked at Home with the phone idle, standby slows this to 2 s.
-            rssi_next_us = now + (now < reconnect_probe_until_us
-                                  ? 100000LL : standby_rssi_period_us(RSSI_PERIOD_US));
+            // Parked at Home with the phone idle, standby slows this to 2 s;
+            // a phone just back from a departure is read faster instead.
+            int64_t period = now < reconnect_probe_until_us ? 100000LL
+                : now < return_fast_until_us ? RETURN_PERIOD_US
+                : standby_rssi_period_us(RSSI_PERIOD_US);
+            approach_set_sample_period(period);
+            rssi_next_us = now + period;
             ble_read_rssi();
         }
         uint32_t seq = rssi_seq;

@@ -14,4 +14,6 @@ void approach_disconnected(void);
 bool approach_connected(void);
 // Raw, timestamped RSSI; this module owns its responsive approach filter.
 void approach_sample(int signal, bool parked_off, int64_t now);
+// How often autolock reads the phone's RSSI now; gaps and freshness scale with it.
+void approach_set_sample_period(int64_t us);
 bool approach_command(const char *args, char *response, size_t length);
