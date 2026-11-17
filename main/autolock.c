@@ -13,7 +13,11 @@
 //
 // Guards: never while the car is in READY. Doors and seats live on the
 // diagnostic bus, out of reach here, so the app forwards its OBD reading as
-// a hold (ATXALB1). Only a fresh clear reading releases it (ATXALB0).
+// a hold (ATXALB1). While the phone is connected only its fresh clear
+// releases it (ATXALB0). Once the phone's link has been gone for 30 s the
+// hold lapses, as the original firmware's hold did: a phone that walked off
+// before its clear arrived otherwise left the car unlocked for good
+// (2026-11-16 16:28). If still armed, the disconnect lock fires then.
 //
 // After a lock, coming back to the car arms it again: the phone's signal at
 // least 10 dB above the line for 2 s while the car stays off. Opening the
@@ -67,6 +71,7 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 #define NEAR_MARGIN_DB  10
 #define NEAR_HOLD_US    (2LL * 1000 * 1000)
 #define BLOCK_MS        30000U
+#define HOLD_LAPSE_US   (30LL * 1000 * 1000)      // hold lapses once the phone is gone this long
 #define SMOOTHING       0.6f
 #define THRESHOLD_MIN   (-100)
 #define THRESHOLD_MAX   (-40)
@@ -110,6 +115,7 @@ static int64_t quick_since;
 static int64_t near_since;
 static volatile uint32_t hold_until_ms; // the app's hold; 0 = none
 static bool was_blocked;
+static int64_t disconnected_at_us; // 0 while the phone is connected
 
 static QueueHandle_t *tx_queue;
 
@@ -221,6 +227,7 @@ static bool app_holds(void)
 void autolock_note_connected(void)
 {
     connected = true;
+    disconnected_at_us = 0;
     standby_note_connected();
     reset_signal();
     reconnect_probe_until_us = approach_connected() ? esp_timer_get_time() + 3000000LL : 0;
@@ -237,6 +244,7 @@ void autolock_note_connected(void)
 void autolock_note_disconnected(void)
 {
     connected = false;
+    disconnected_at_us = esp_timer_get_time();
     standby_note_disconnected();
     approach_disconnected();
     reset_signal();
@@ -400,6 +408,18 @@ void autolock_tick(void)
             ESP_LOGI(TAG, "the app reports a door open or someone seated; not locking");
         } else {
             fire("phone gone for 5 s");
+        }
+    }
+
+    // Door/seat hold lapse: the phone has been gone 30 s and can't send its
+    // clear any more. READY still blocks in fire()'s callers and here.
+    if (hold_until_ms != 0 && !connected && disconnected_at_us != 0
+            && now - disconnected_at_us >= HOLD_LAPSE_US) {
+        hold_until_ms = 0;
+        ESP_LOGI(TAG, "phone gone for 30 s; door/seat hold lapsed");
+        if (enabled && armed && obd_off && !ready && hold_until_us == 0
+                && verify_until_us == 0 && unlockauth_has_key()) {
+            fire("phone gone, hold lapsed");
         }
     }
 

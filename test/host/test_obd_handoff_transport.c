@@ -68,11 +68,17 @@ static void reset(void){
  strcpy(vin,"KMHM141AAN0123456");strcpy(token,"-");memset(selected,0,6);
  close_calls=scan_calls=search_calls=write_calls=hold_calls=observe_calls=0;
  wait_result=0;phone=authorized=true;scripted=false;ack_close=true;wrong_vin=false;body_reads=0;
+ handoff_enabled=true;
  owner_script=false;bc03_reads=0;owner_locked=false;touched=false;silent_scans=0;scan_param_calls=0;
  lease_started=lease_ended=owner_calls=0;lease_touched=false;
 }
 static void start(void){CHECK(obd_handoff_command("nabcdef12,4f4244",out,sizeof(out)));}
 int main(void){
+ // Switched off in the shipped build: ATXOH says so and nothing starts.
+ reset();handoff_enabled=false;
+ CHECK(obd_handoff_command("",out,sizeof(out))&&!strcmp(out,"XOH:0,disabled"));
+ CHECK(!obd_handoff_command("nabcdef12,4f4244",out,sizeof(out))&&!active&&!managed);
+ CHECK(!obd_handoff_command("r",out,sizeof(out))&&!obd_handoff_command("0",out,sizeof(out)));
  reset();start();CHECK(active&&managed&&worker);CHECK(!strcmp(token,"ABCDEF12"));CHECK(obd_handoff_blocks());
  CHECK(!obd_handoff_command("n12345678,4f4244",out,sizeof(out)));
  CHECK(!obd_handoff_command("vKMHM141AAN0123456",out,sizeof(out)));

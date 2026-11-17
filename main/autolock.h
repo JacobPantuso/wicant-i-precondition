@@ -9,8 +9,10 @@
 //                (signal: smoothed dBm, 0 when there's no reading)
 //   ATXAL0|1     disable | enable (persists; default enabled)
 //   ATXALT<dBm>  the walk-away line, -100 to -40 (persists; default -85)
-//   ATXALB1|0    hold until released | release: the app's OBD reading says a door
-//                is open or someone is seated, which this bus can't see
+//   ATXALB1|0    hold | release: the app's OBD reading says a door is open
+//                or someone is seated, which this bus can't see. A connected
+//                phone's hold stays until its fresh release; 30 s after the
+//                phone's link drops it lapses.
 //   $XAL:...     pushed after a lock, while the phone is connected
 #pragma once
 

@@ -7,7 +7,7 @@
 //             BLE stays up for the approach unlock, Wi-Fi and the power LED
 //             are off, power management is on, and the voltage sleep timer
 //             is held off. Ends on a new drive or an accepted approach unlock.
-//   PROTECT - 48 h in PARKED, or the battery at the floor for 2 min. Sleep
+//   PROTECT - 48 h in PARKED, or the battery under 11.6 V for 10 min. Sleep
 //             now with BLE off (sleep_mode.c); the next drive restarts WiCAN.
 //
 // The 48 h budget starts at PARKED entry and nothing but a drive or an
@@ -32,10 +32,10 @@
 #include "types.h"
 
 #define BUDGET_US         (48LL * 3600 * 1000 * 1000)
-#define FLOOR_DWELL_US    (120LL * 1000 * 1000)
+#define FLOOR_DWELL_US    (10LL * 60 * 1000 * 1000)
 #define VOLTAGE_STALE_US  (10LL * 1000 * 1000)
-#define FLOOR_MV_DEFAULT  12200
-#define FLOOR_MV_MIN      11500
+#define FLOOR_MV_DEFAULT  11600
+#define FLOOR_MV_MIN      11000
 #define FLOOR_MV_MAX      12800
 #define HOME_RSSI_US      (2LL * 1000 * 1000)
 #define LEASE_REFUNDS     3
@@ -52,7 +52,6 @@ static volatile bool driving;
 static volatile bool lease_token;
 static volatile unsigned lease_refunds;
 static volatile bool home_idle;
-static bool slow_applied;
 static volatile bool connected;
 static volatile int vbat_mv = -1;
 static volatile int64_t vbat_at;
@@ -254,11 +253,6 @@ void standby_tick(void)
         }
     }
 
-    bool slow = s == STANDBY_PARKED && home_idle && connected;
-    if (slow != slow_applied) {
-        slow_applied = slow;
-        standby_platform_slow_link(slow);
-    }
 }
 
 bool standby_command(const char *args, char *response, size_t response_len)

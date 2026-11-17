@@ -9,11 +9,9 @@
 #include "standby.h"
 
 static standby_state_t applied_state;
-static int apply_calls, slow_calls;
-static bool slow_link;
+static int apply_calls;
 static float vbat = 12.6f;
 void standby_platform_apply(standby_state_t s, bool pm) { applied_state = s; apply_calls++; }
-void standby_platform_slow_link(bool slow) { slow_link = slow; slow_calls++; }
 int standby_platform_reset_reason(void) { return 1; }
 
 static bool ready, radio_up = true;
@@ -150,6 +148,30 @@ int main(void) {
     command("b0"); advance(8000);                             // the app's fresh clear
     CHECK(lock_requests == before + 1);
 
+    // Hold lapse. A hold sent while connected survives the 5 s disconnect
+    // check, then lapses 30 s after the link drops and the lock fires
+    // (2026-11-16 16:28: the phone walked off before its clear arrived).
+    direct_managed = false;
+    start_parked_cycle(); connected(); radio_signal = -60; advance(1000);
+    command("b1"); before = lock_requests;
+    disconnected(); advance(6000);
+    CHECK(lock_requests == before);                  // 5 s check: held
+    advance(23000); CHECK(lock_requests == before);  // 29 s gone: still held
+    advance(1500);  CHECK(lock_requests == before + 1);
+    // Connected, the hold never lapses on time alone: the phone is there to
+    // send its own clear.
+    start_parked_cycle(); connected(); radio_signal = -60; advance(1000);
+    command("b1"); before = lock_requests; advance(60000);
+    CHECK(lock_requests == before);
+    // A reconnect inside the 30 s restarts the clock; the hold stays.
+    disconnected(); advance(20000); connected(); advance(1000);
+    disconnected(); advance(20000); CHECK(lock_requests == before);
+    advance(11000); CHECK(lock_requests == before + 1);
+    // Car back on: the lapse never fires a lock.
+    start_parked_cycle(); connected(); advance(1000); command("b1");
+    before = lock_requests; disconnected(); advance(3000); ready = true;
+    advance(35000); CHECK(lock_requests == before); ready = false;
+
     // ---- Parked BLE standby -------------------------------------------------
     char xpk[112];
     #define PK(args) CHECK(standby_command(args, xpk, sizeof xpk))
@@ -176,18 +198,19 @@ int main(void) {
     radio_signal = -95; advance(8000);
     CHECK(standby_state() == STANDBY_PARKED && applied_state == STANDBY_PARKED);
     PK(""); CHECK(strncmp(xpk, "XPK:1,parked,walk-away,", 23) == 0);
-    CHECK(strstr(xpk, ",12600,12200,0,0,1,1") != NULL);
+    CHECK(strstr(xpk, ",12600,11600,0,0,1,1") != NULL);
 
     // The phone reconnecting from the house: no lease, no new budget.
     int64_t entered = fake_now;
     disconnected(); advance(1000); radio_signal = -80; connected(); advance(2000);
     CHECK(standby_state() == STANDBY_PARKED && !autolock_can_handoff());
-    // Home idle: slow link and 2 s sampling while parked; a disconnect ends it.
-    PK("h1"); advance(80); CHECK(slow_link && slow_calls == 1);
+    // Home idle: 2 s sampling while parked, never a slow link; a disconnect ends it.
+    PK("h1"); advance(80);
     CHECK(standby_rssi_period_us(500000) == 2000000);
-    disconnected(); advance(80); CHECK(!slow_link && slow_calls == 2);
+    disconnected(); advance(80);
     CHECK(standby_rssi_period_us(500000) == 500000);
-    connected(); advance(80); CHECK(!slow_link);   // the hint doesn't survive a reconnect
+    connected(); advance(80);
+    CHECK(standby_rssi_period_us(500000) == 500000);   // the hint doesn't survive a reconnect
 
     // The 48 h budget runs from the lock, not from the last reconnect.
     fake_now = entered + 47LL * 3600 * 1000000; advance(80);
@@ -201,17 +224,22 @@ int main(void) {
     command("p1"); CHECK(standby_state() == STANDBY_ACTIVE && autolock_can_handoff());
     advance(80); CHECK(applied_state == STANDBY_ACTIVE);
 
-    // Battery floor: 2 min below it ends standby; a brief dip doesn't.
+    // Battery floor: 10 min under 11.6 V ends standby. 11.8 V, the resting
+    // voltage that tripped the old 12.2 V floor in the field, never does, and
+    // a brief dip under the floor resets the clock.
     start_parked_cycle(); connected(); radio_signal = -95; advance(8000);
     CHECK(standby_state() == STANDBY_PARKED);
-    vbat = 12.1f; advance(60000); vbat = 12.4f; advance(1000);
-    vbat = 12.1f; advance(100000); CHECK(standby_state() == STANDBY_PARKED);
-    advance(21000); CHECK(standby_state() == STANDBY_PROTECT);
+    vbat = 11.8f; fake_now += 30LL * 60 * 1000000; advance(1000);
+    CHECK(standby_state() == STANDBY_PARKED);
+    vbat = 11.5f; advance(300000); vbat = 11.9f; advance(1000);
+    vbat = 11.5f; advance(540000); CHECK(standby_state() == STANDBY_PARKED);
+    advance(61000); CHECK(standby_state() == STANDBY_PROTECT);
     PK(""); CHECK(strncmp(xpk, "XPK:1,protect,battery,", 22) == 0);
     // No reading at all counts as low.
     vbat = 12.6f; command("p1"); start_parked_cycle(); connected(); radio_signal = -95; advance(8000);
     CHECK(standby_state() == STANDBY_PARKED);
-    vbat = -1; advance(121000); CHECK(standby_state() == STANDBY_PROTECT);
+    vbat = -1; advance(540000); CHECK(standby_state() == STANDBY_PARKED);
+    advance(61000); CHECK(standby_state() == STANDBY_PROTECT);
     PK(""); CHECK(strncmp(xpk, "XPK:1,protect,no-voltage,", 25) == 0);
     vbat = 12.6f;
 
@@ -258,7 +286,7 @@ int main(void) {
     PK("x");   // nothing to leave: still OK
 
     // Command validation.
-    CHECK(!standby_command("v11000", xpk, sizeof xpk));
+    CHECK(!standby_command("v10500", xpk, sizeof xpk));
     CHECK(!standby_command("e2", xpk, sizeof xpk));
     PK("v12000"); PK(""); CHECK(strstr(xpk, ",12000,") != NULL);
     return test_report("lock/approach integration");

@@ -37,7 +37,7 @@ static void reset(void) {
     memset(&fake_body, 0, sizeof fake_body);
     enabled = true; armed = false; ready_seen = false; obd_off = false;
     parked = false; connected = true; hold_until_us = 0; verify_until_us = 0;
-    hold_until_ms = 0; count = 0; reset_signal();
+    hold_until_ms = 0; count = 0; disconnected_at_us = 0; reset_signal();
 }
 static void off_after_drive(void) { command("p1"); command("p0"); CHECK(armed); }
 int main(void) {

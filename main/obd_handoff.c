@@ -25,6 +25,17 @@
 #define CLOSED BIT4
 #define GATT_APP 0x48
 #define LEASE_US 90000000LL
+// Switched off (2026-11-16): on the WiCAN's single radio, scanning for and
+// connecting to the OBD adapter starved the phone's own link. Its commands
+// timed out and it dropped within seconds of every lease (21:00, 21:34 field
+// logs); the one lease that worked had the phone's Bluetooth off. The phone
+// keeps its OBD adapter and forwards door/belt readings instead. ATXOH then
+// reports XOH:0, which the app reads as "unavailable" before releasing
+// anything. Host tests switch it back on to keep covering the worker.
+#ifndef OBD_HANDOFF_ENABLED
+#define OBD_HANDOFF_ENABLED 0
+#endif
+static bool handoff_enabled = OBD_HANDOFF_ENABLED;
 #define FRESH_US 1500000LL
 static const char *TAG="obd_handoff";
 static EventGroupHandle_t events;
@@ -287,6 +298,7 @@ void obd_handoff_tick(void) {
     }
 }
 void obd_handoff_init(void) {
+    if (!handoff_enabled) return;   // no GATT client registered at all
     if (!events) {
         events = xEventGroupCreate();
     }
@@ -308,6 +320,10 @@ bool obd_handoff_shutdown(void) {
 }
 static int hex(char c){if(c>='0'&&c<='9')return c-'0';c=(char)tolower((unsigned char)c);return c>='a'&&c<='f'?c-'a'+10:-1;}
 bool obd_handoff_command(const char *args,char *out,size_t cap) {
+    if(!handoff_enabled){
+        if(!*args){snprintf(out,cap,"XOH:0,disabled");return true;}
+        return false;
+    }
     if(!*args){int remain=active?(int)((deadline-esp_timer_get_time())/1000000):0;
         portENTER_CRITICAL(&mux);int64_t sample_at=doors_at;portEXIT_CRITICAL(&mux);
         snprintf(out,cap,"XOH:1,%s,%d,%s,%s,%s,%lld",state,remain>0?remain:0,

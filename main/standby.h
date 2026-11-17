@@ -3,7 +3,7 @@
 //
 // After a departure lock WiCAN stays reachable over BLE for the phone's
 // approach unlock, with no OBD adapter link and no vehicle queries, for at
-// most 48 h or until the 12 V battery reaches the floor. Then it falls back
+// most 48 h or until the 12 V battery stays under the floor for 10 min. Then it falls back
 // to the existing protective sleep (BLE off).
 //
 // Contract with the app (BLE only):
@@ -14,10 +14,11 @@
 //                the app reapplies it on every connect.
 //   ATXPKH1|0    the car is parked inside the owner's Home zone, where the
 //                app never approach-unlocks | not. Parked only: slows RSSI
-//                sampling and asks for a slow link. Grants nothing. Any
-//                disconnect clears it; the app resends it on connect.
-//   ATXPKP1|0    power management in standby on | off (A/B measurement)
-//   ATXPKV<mV>   battery floor, 11500-12800 (volatile; default 12200)
+//                sampling to 2 s. Grants nothing. Any disconnect clears it;
+//                the app resends it on connect. (It no longer asks for a slow
+//                link: the phone's commands must stay prompt.)
+//   ATXPKP1|0    reserved: power management is not built in (2026-11-16)
+//   ATXPKV<mV>   battery floor, 11000-12800 (volatile; default 11600)
 //   ATXPKX       leave parked standby now: the owner asked the phone to
 //                resume its OBD adapter. Grants no lease; the next drive does.
 //   $XPK:...     pushed on every state change while the phone is connected
@@ -68,5 +69,4 @@ bool standby_command(const char *args, char *response, size_t response_len);
 
 // Platform side effects (standby_platform.c on the device, stubs in tests).
 void standby_platform_apply(standby_state_t state, bool pm_allowed);
-void standby_platform_slow_link(bool slow);
 int standby_platform_reset_reason(void);

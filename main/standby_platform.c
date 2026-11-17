@@ -59,11 +59,6 @@ void standby_platform_apply(standby_state_t state, bool pm_allowed)
     }
 }
 
-void standby_platform_slow_link(bool slow)
-{
-    ble_set_slow_link(slow);
-}
-
 int standby_platform_reset_reason(void)
 {
     return (int)esp_reset_reason();
