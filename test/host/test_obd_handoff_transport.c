@@ -16,7 +16,8 @@ static unsigned body_reads;
 EventGroupHandle_t xEventGroupCreate(void){return &bits;}
 EventBits_t xEventGroupClearBits(EventGroupHandle_t g,EventBits_t b){EventBits_t old=*g;*g&=~b;return old;}
 EventBits_t xEventGroupSetBits(EventGroupHandle_t g,EventBits_t b){*g|=b;return *g;}
-EventBits_t xEventGroupWaitBits(EventGroupHandle_t g,EventBits_t b,int clear_on,int all,int timeout){if(scripted&&(b&SCANNED)){matches=1;*g|=SCANNED;} EventBits_t result=wait_result?wait_result:(*g&b);if(clear_on)*g&=~b;return result;}
+static int silent_scans,scan_param_calls;
+EventBits_t xEventGroupWaitBits(EventGroupHandle_t g,EventBits_t b,int clear_on,int all,int timeout){if(scripted&&(b&SCANNED)){if(silent_scans>0)silent_scans--;else matches=1;*g|=SCANNED;} EventBits_t result=wait_result?wait_result:(*g&b);if(clear_on)*g&=~b;return result;}
 BaseType_t xTaskCreate(void(*fn)(void*),const char*n,unsigned stack,void*arg,unsigned priority,TaskHandle_t*out){*out=(void*)1;return pdPASS;}
 void vTaskDelay(int ms){fake_now+=(int64_t)ms*1000;}
 void vTaskDelete(void*p){}
@@ -54,7 +55,7 @@ int esp_ble_gattc_get_descr_by_char_handle(int a,int b,int c,esp_bt_uuid_t d,esp
 int esp_ble_gattc_write_char_descr(int a,int b,int c,int d,uint8_t*e,int f,int g){return ESP_OK;}
 int esp_ble_gap_start_scanning(int a){scan_calls++;return ESP_OK;}
 uint8_t *esp_ble_resolve_adv_data_by_type(uint8_t*p,uint16_t len,int type,uint8_t*n){if(len>=2&&p[0]&&p[0]<len&&p[1]==type){*n=p[0]-1;return p+2;}return NULL;}
-int esp_ble_gap_set_scan_params(esp_ble_scan_params_t*p){return ESP_OK;}
+int esp_ble_gap_set_scan_params(esp_ble_scan_params_t*p){scan_param_calls++;return ESP_OK;}
 int esp_ble_gattc_open(int a,uint8_t*b,int c,bool d){if(scripted){opening=false;link_up=true;write_handle=1;bits|=READY;}return ESP_OK;}
 int esp_ble_gap_stop_scanning(void){return ESP_OK;}
 int esp_ble_gattc_register_callback(void(*cb)(esp_gattc_cb_event_t,esp_gatt_if_t,esp_ble_gattc_cb_param_t*)){return ESP_OK;}
@@ -67,7 +68,7 @@ static void reset(void){
  strcpy(vin,"KMHM141AAN0123456");strcpy(token,"-");memset(selected,0,6);
  close_calls=scan_calls=search_calls=write_calls=hold_calls=observe_calls=0;
  wait_result=0;phone=authorized=true;scripted=false;ack_close=true;wrong_vin=false;body_reads=0;
- owner_script=false;bc03_reads=0;owner_locked=false;touched=false;
+ owner_script=false;bc03_reads=0;owner_locked=false;touched=false;silent_scans=0;scan_param_calls=0;
  lease_started=lease_ended=owner_calls=0;lease_touched=false;
 }
 static void start(void){CHECK(obd_handoff_command("nabcdef12,4f4244",out,sizeof(out)));}
@@ -158,5 +159,13 @@ int main(void){
  // until the lease runs out.
  reset();start();scripted=true;owner_script=true;bc03_reads=1;run(NULL);
  CHECK(owner_calls==0&&!owner_locked&&strcmp(doors,"locked")!=0);
+ // The phone's iOS link to the adapter can take seconds to drop; an adapter
+ // that starts advertising on the third 2 s scan still completes the lease.
+ reset();start();scripted=true;silent_scans=2;run(NULL);
+ CHECK(scan_param_calls==3&&!strcmp(state,"done")&&!strcmp(doors,"locked"));
+ // Never advertising: four scans, then a failed lease that hands back.
+ reset();start();scripted=true;silent_scans=99;run(NULL);
+ CHECK(scan_param_calls==4&&!strcmp(state,"failed")&&write_calls==0&&!lease_touched);
+ obd_handoff_tick();CHECK(!managed);
  return test_report("OBD handoff transport");
 }

@@ -179,8 +179,18 @@ static bool connect_adapter(void) {
     state="scanning";matches=0;write_handle=notify_handle=0;xEventGroupClearBits(events,0xff);
     esp_ble_scan_params_t params={.scan_type=BLE_SCAN_TYPE_ACTIVE,.own_addr_type=BLE_ADDR_TYPE_PUBLIC,
       .scan_filter_policy=BLE_SCAN_FILTER_ALLOW_ALL,.scan_interval=0x50,.scan_window=0x30,.scan_duplicate=BLE_SCAN_DUPLICATE_DISABLE};
-    if(esp_ble_gap_set_scan_params(&params)!=ESP_OK)return false;
-    EventBits_t b=xEventGroupWaitBits(events,SCANNED|DROPPED,pdTRUE,pdFALSE,pdMS_TO_TICKS(3500));
+    // An adapter still connected to the phone doesn't advertise, and iOS can
+    // take seconds to drop the link after the app lets go. One 2 s window
+    // failed the whole lease (2026-11-16 21:00); keep scanning in 2 s windows
+    // for up to four tries while nothing matches. Two matches stay a failure.
+    EventBits_t b=0;
+    for(int attempt=0;attempt<4&&alive();attempt++){
+        xEventGroupClearBits(events,SCANNED);
+        if(esp_ble_gap_set_scan_params(&params)!=ESP_OK)return false;
+        b=xEventGroupWaitBits(events,SCANNED|DROPPED,pdTRUE,pdFALSE,pdMS_TO_TICKS(3500));
+        if(!(b&SCANNED)||(b&DROPPED)||matches!=0)break;
+        ESP_LOGI(TAG,"adapter not advertising yet (scan %d of 4)",attempt+1);
+    }
     if(!(b&SCANNED)||(b&DROPPED)||matches!=1||!alive())return false;
     state="connecting";
     opening=true;
