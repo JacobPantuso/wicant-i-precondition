@@ -254,6 +254,17 @@ finished:
 }
 void obd_handoff_tick(void) {
     if(owner_locked){owner_locked=false;autolock_owner_locked();}
+    // A failed lease hands safety ownership back to the app. Leaving it
+    // managed swallowed every later ATXALP0/ATXALB0 while the guard kept
+    // blocking, so one failed handoff vetoed walk-away until the next drive
+    // (2026-11-16 21:00 field log). The hold latched at finish stays on: only
+    // a reading the app sends after this point can clear it, so stale data
+    // still never authorizes a lock. A successful lease ("done") keeps
+    // ownership; there is nothing left to lock.
+    if(managed&&!active&&!worker&&!link_up&&!opening&&!strcmp(state,"failed")){
+        managed=false;
+        ESP_LOGI(TAG,"handoff failed; the app's next fresh reading decides the lock");
+    }
     if(active){
         bool apply=false,on=false,blocked=true;
         portENTER_CRITICAL(&mux);

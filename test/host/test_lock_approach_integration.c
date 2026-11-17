@@ -135,6 +135,21 @@ int main(void) {
     autolock_handoff_observation(true,true);connected();advance(8000);disconnected();advance(6000);
     CHECK(lock_requests==before);
 
+    // Field failure 2026-11-16 21:00: the lease failed, the app took its
+    // adapter back and sent fresh off/clear readings. While WiCAN still owned
+    // safety those were swallowed and walk-away never fired. Once ownership
+    // returns, the hold latched at the failure still blocks until a reading
+    // sent after it, which then lets the signal walk-away lock.
+    direct_managed = false; direct_blocked = false; vbat = 12.6f;
+    start_parked_cycle(); radio_signal = -60; advance(1000);
+    direct_managed = true; direct_blocked = true;            // lease running
+    command("b1");                                            // hold latched at finish
+    direct_managed = false;                                   // lease failed: released
+    before = lock_requests; radio_signal = -95; advance(8000);
+    CHECK(lock_requests == before);                           // latched hold still blocks
+    command("b0"); advance(8000);                             // the app's fresh clear
+    CHECK(lock_requests == before + 1);
+
     // ---- Parked BLE standby -------------------------------------------------
     char xpk[112];
     #define PK(args) CHECK(standby_command(args, xpk, sizeof xpk))

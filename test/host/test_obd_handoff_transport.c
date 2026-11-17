@@ -122,14 +122,21 @@ int main(void){
  reset();start();scripted=true;run(NULL);
  CHECK(!active&&!link_up&&!worker&&!strcmp(state,"done")&&!strcmp(doors,"locked"));
  CHECK(managed&&obd_handoff_blocks());CHECK(body_reads>=2&&doors_at>0);
+ obd_handoff_tick();CHECK(managed&&obd_handoff_blocks());   // done: ownership stays
  reset();start();scripted=true;ack_close=false;run(NULL);
  CHECK(!active&&link_up&&!strcmp(state,"closing"));
  CHECK(!obd_handoff_command("n12345678,4f4244",out,sizeof(out)));
+ obd_handoff_tick();CHECK(managed);   // adapter link still up: not yet
  cp=(esp_ble_gattc_cb_param_t){0};cp.disconnect.conn_id=7;client_event(ESP_GATTC_DISCONNECT_EVT,3,&cp);
  CHECK(!strcmp(state,"failed")&&!link_up);
+ obd_handoff_tick();CHECK(!managed);
  // A complete VIN reply from another vehicle never reaches safety polling.
  reset();start();scripted=true;wrong_vin=true;run(NULL);
  CHECK(!strcmp(state,"failed")&&body_reads==0&&observe_calls==0&&obd_handoff_blocks());
+ // A failed lease hands safety back to the app on the next tick, with the
+ // hold it latched at finish still on (2026-11-16 21:00 field failure).
+ hold_calls=0;obd_handoff_tick();
+ CHECK(!managed&&!obd_handoff_blocks()&&!obd_handoff_managed());
  CHECK(lease_ended==1&&lease_touched);   // VIN probing touched the car: no refund
  // Every started lease uses the departure's lease; a scan that never finds
  // the adapter ends without touching the car.
