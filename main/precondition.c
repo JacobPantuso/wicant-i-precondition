@@ -185,7 +185,13 @@ static bool activation_is_release(const message_payload_t *msg, const twai_messa
 #define BATTERY_TEMPERATURE_MAX_INDEX 1U
 #define BATTERY_TEMPERATURE_DATA_LENGTH 2U
 
-#define IS_BATTERY_TEMPERATURE_FRAME(frame_id) ((frame_id) == BATTERY_TEMPERATURE_FRAME_ID)
+// 0x152 on Ioniq 5/EV6; the IONIQ 6 sends it as the 29-bit CCU remap
+// 0x05415002 (base 0x150 + index 2), same min/max bytes 0/1 (egmpdbc
+// ioniq6-2024.dbc). Matching only 0x152 left the temperature-valid flag
+// unset on IONIQ 6, so the app's auto-precondition planner always skipped
+// with "no pack temperature" (2026-11-14).
+#define IS_BATTERY_TEMPERATURE_FRAME(frame_id) \
+    ((frame_id) == BATTERY_TEMPERATURE_FRAME_ID || (frame_id) == 0x05415002U)
 
 #define CAR_BUS CAN_BUS_0
 #define HEAD_UNIT_BUS CAN_BUS_1
