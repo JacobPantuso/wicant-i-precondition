@@ -29,6 +29,7 @@ static QueueHandle_t queue = (void *)1;
 static char response[96];
 
 bool car_in_ready_fresh(void) { return ready; }
+bool car_in_ready(void) { return ready; }
 bool unlockauth_has_key(void) { return true; }
 void unlockauth_new_challenge(char *out) { memset(out, 'a', 32); out[32] = 0; }
 bool unlockauth_check(unlockauth_purpose_t p, const uint8_t *mac) { return p == UNLOCKAUTH_APPROACH; }

@@ -1,7 +1,12 @@
 // Walk-away auto-lock; see autolock.h and docs/plans/wican-disconnect-auto-lock.md.
 //
-// Arming: fresh OBD off (ATXALP0) after an observed on session.
-// Missing CAN frames never authorize off. READY inhibits execution.
+// Arming, after an observed on session, from whichever comes first:
+//  - the car's own power frame (0x038) explicitly reading not-READY, or
+//  - fresh OBD off from the phone (ATXALP0).
+// Missing CAN frames never authorize off: a 0x038 that merely went quiet
+// leaves car_in_ready() where it was. READY inhibits execution.
+// The bus edge exists because ATXALP0 alone raced the owner: walking off
+// before the phone's OBD read landed left the car unarmed (2026-11-18 19:05).
 //
 // Once armed, whichever comes first locks:
 //  - Signal: the phone's link RSSI, read here every 500 ms and smoothed as
@@ -121,6 +126,7 @@ static int64_t near_since;
 static volatile uint32_t hold_until_ms; // the app's hold; 0 = none
 static bool was_blocked;
 static int64_t disconnected_at_us; // 0 while the phone is connected
+static bool frame_ready_last;      // car_in_ready() at the previous tick
 
 static QueueHandle_t *tx_queue;
 
@@ -356,6 +362,22 @@ static void sample(int rssi, int64_t now)
     }
 }
 
+// The drive is over: arm for the walk-away. Shared by the bus edge and the
+// phone's ATXALP0, so whichever lands first arms and the other is a no-op.
+static void arm_after_drive(const char *source)
+{
+    obd_off = true;   // "off is authorized", by the bus or by the phone
+    parked = true;
+    standby_note_off();
+    ready_seen = false;
+    armed = enabled;
+    armed_at_us = esp_timer_get_time();
+    reset_signal();
+    if (!connected && armed) hold_until_us = armed_at_us + HOLD_US;
+    ESP_LOGI(TAG, "drive ended (%s); %s", source,
+             armed ? "armed for walk-away lock" : "walk-away lock off");
+}
+
 void autolock_tick(void)
 {
     int64_t now = esp_timer_get_time();
@@ -364,6 +386,11 @@ void autolock_tick(void)
     // Arming from READY edges. If 0x038 never reaches this bus the flag
     // never moves; say so once rather than on every tick.
     bool ready = car_in_ready_fresh();
+    // Only a change counts: READY merely being false (ACC, or the phone's
+    // OBD reading the car on while 0x038 never said READY) never arms.
+    bool frame_ready = car_in_ready();
+    bool frame_fell = frame_ready_last && !frame_ready;
+    frame_ready_last = frame_ready;
     if (ready) {
         standby_note_drive();
         approach_reset_session();
@@ -374,8 +401,11 @@ void autolock_tick(void)
         bodycmd_cancel_local_lock();
         hold_until_us = 0;
         reset_signal();
+    } else if (frame_fell && ready_seen && !obd_off) {
+        // CAN silence is unknown, never an off edge: only a 0x038 frame that
+        // explicitly reads not-READY clears car_in_ready(). ATXALP0 arms too.
+        arm_after_drive("READY off on the bus");
     }
-    // CAN silence is unknown, never an off edge. Only ATXALP0 arms.
 
     // The arming window closes after 12 h parked: by then a disconnect is
     // a battery event, not a walk-away.
@@ -536,14 +566,7 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
             hold_until_us = 0;
             reset_signal();
         } else if (!car_in_ready_fresh() && ready_seen && !obd_off) {
-            obd_off = true;
-            parked = true;
-            standby_note_off();
-            ready_seen = false;
-            armed = enabled;
-            armed_at_us = esp_timer_get_time();
-            reset_signal();
-            if (!connected && armed) hold_until_us = armed_at_us + HOLD_US;
+            arm_after_drive("phone: OBD off");
         }
         snprintf(response, response_len, "OK");
         return true;
