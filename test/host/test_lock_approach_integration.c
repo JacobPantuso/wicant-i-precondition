@@ -92,8 +92,10 @@ int main(void) {
     CHECK(approach_command("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", response, sizeof response));
     CHECK(unlock_requests == 1);
     advance(1000); command(""); CHECK(strncmp(response, "XAL:1,", 6) == 0);
+    // Walking off again: nothing in the 15 s after the unlock, then the lock.
     before = lock_requests; radio_signal = -95; advance(8000);
-    CHECK(lock_requests == before + 1);
+    CHECK(lock_requests == before);
+    advance(8000); CHECK(lock_requests == before + 1);
 
     // Bluetooth loss remains an independent trigger after an observed on/off cycle.
     start_parked_cycle(); before = lock_requests; disconnected(); advance(4960);

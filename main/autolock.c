@@ -82,6 +82,12 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 #define BLOCK_MS        30000U
 #define HOLD_LAPSE_US   (30LL * 1000 * 1000)      // hold lapses once the phone is gone this long
 #define SMOOTHING       0.6f
+// After an approach unlock: no walk-away lock for a while, so the last
+// metres of a walk back can't relock behind the owner (unlocked at -73,
+// relocked at -84 two seconds later, 2026-11-20 10:25). Then, if the car
+// isn't started and no door was reported open, relock as a fob would.
+#define APPROACH_GRACE_US  (15LL * 1000 * 1000)
+#define APPROACH_RELOCK_US (30LL * 1000 * 1000)
 #define THRESHOLD_MIN   (-100)
 #define THRESHOLD_MAX   (-40)
 
@@ -127,6 +133,9 @@ static volatile uint32_t hold_until_ms; // the app's hold; 0 = none
 static bool was_blocked;
 static int64_t disconnected_at_us; // 0 while the phone is connected
 static bool frame_ready_last;      // car_in_ready() at the previous tick
+static int64_t grace_until_us;     // 0 = no post-approach grace
+static int64_t relock_at_us;       // 0 = no "not started" relock pending
+static bool relock_in_flight;      // the burst being verified is that relock
 
 static QueueHandle_t *tx_queue;
 
@@ -286,6 +295,7 @@ static void fire(const char *why)
     if (status.busy) return;
     frames_at_request = status.frames;
     locks_at_request = status.locks_completed;
+    relock_at_us = 0; // any lock makes a pending relock moot
     bodycmd_request_lock_local();
     verify_until_us = esp_timer_get_time() + VERIFY_US;
     ESP_LOGI(TAG, "firing walk-away lock: %s", why);
@@ -299,6 +309,8 @@ void autolock_approach_unlocked(void)
     if (!enabled || !parked || !obd_off || car_in_ready_fresh()) return;
     armed = true;
     armed_at_us = esp_timer_get_time();
+    grace_until_us = armed_at_us + APPROACH_GRACE_US;
+    relock_at_us = armed_at_us + APPROACH_RELOCK_US;
     hold_until_us = 0;
     reset_signal();
     ESP_LOGI(TAG, "authenticated return; observing the next departure");
@@ -342,6 +354,11 @@ static void sample(int rssi, int64_t now)
         if (blocked || verify_until_us != 0 || !unlockauth_has_key()) {
             return;
         }
+        if (grace_until_us && now < grace_until_us) {
+            away_since = 0; // the walk back isn't over yet
+            quick_since = 0;
+            return;
+        }
         bool quick = quick_since && now - quick_since >= QUICK_HOLD_US;
         bool held = away_since && now - away_since >= SIGNAL_HOLD_US;
         if (quick || held) {
@@ -372,6 +389,8 @@ static void arm_after_drive(const char *source)
     ready_seen = false;
     armed = enabled;
     armed_at_us = esp_timer_get_time();
+    grace_until_us = 0;   // a new drive's departure: no leftover approach state
+    relock_at_us = 0;
     reset_signal();
     if (!connected && armed) hold_until_us = armed_at_us + HOLD_US;
     ESP_LOGI(TAG, "drive ended (%s); %s", source,
@@ -398,6 +417,8 @@ void autolock_tick(void)
         obd_off = false;
         parked = false;
         armed = false;
+        grace_until_us = 0;
+        relock_at_us = 0; // started: no "not started" relock
         bodycmd_cancel_local_lock();
         hold_until_us = 0;
         reset_signal();
@@ -467,6 +488,21 @@ void autolock_tick(void)
         }
     }
 
+    // Not started within 30 s of an approach unlock: relock. A door the app
+    // reported open (ATXALB1) cancels it instead; the walk-away lock covers
+    // the next departure then.
+    if (relock_at_us && now >= relock_at_us) {
+        relock_at_us = 0;
+        if (enabled && parked && obd_off && !ready && verify_until_us == 0
+                && !app_holds() && unlockauth_has_key()) {
+            relock_in_flight = true;
+            fire("not started within 30 s of the approach unlock");
+            if (verify_until_us == 0) relock_in_flight = false; // fire() declined
+        } else {
+            ESP_LOGI(TAG, "approach relock skipped");
+        }
+    }
+
     // Burst verification: every frame of the sequence on the bus is the
     // only confirmation available on M-CAN (the door bits live behind UDS
     // on the diagnostic bus).
@@ -475,7 +511,8 @@ void autolock_tick(void)
         bodycmd_get_status(&status);
         if (status.locks_completed > locks_at_request) {
             last = RESULT_LOCKED;
-            approach_departed();
+            if (relock_in_flight) approach_relocked(); else approach_departed();
+            relock_in_flight = false;
             standby_note_locked("walk-away");
             count++;
             armed = false;   // until the phone comes back to the car
@@ -486,6 +523,7 @@ void autolock_tick(void)
         } else if (now >= verify_until_us) {
             last = status.frames > frames_at_request ? RESULT_UNCONFIRMED
                                                      : RESULT_REJECTED;
+            relock_in_flight = false;
             count++;
             armed = false;
             verify_until_us = 0;
@@ -503,6 +541,7 @@ static bool autolock_apply_command(const char *,char *,size_t);
 void autolock_handoff_invalidate(void)
 {
     armed=false;obd_off=false;parked=false;ready_seen=false;
+    grace_until_us=0;relock_at_us=0;relock_in_flight=false;
     hold_until_ms=1;hold_until_us=0;verify_until_us=0;
     bodycmd_cancel_local_lock();reset_signal();approach_reset_session();
 }
@@ -521,6 +560,8 @@ void autolock_owner_locked(void)
     if (!parked || !obd_off || car_in_ready_fresh() || verify_until_us != 0) return;
     armed = false;
     hold_until_us = 0;
+    grace_until_us = 0;
+    relock_at_us = 0;
     bodycmd_cancel_local_lock();
     reset_signal();
     approach_departed();
@@ -562,6 +603,8 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
             obd_off = false;
             parked = false;
             armed = false;
+            grace_until_us = 0;
+            relock_at_us = 0;
             bodycmd_cancel_local_lock();
             hold_until_us = 0;
             reset_signal();
@@ -592,7 +635,13 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
             }
         }
         hold_until_ms = until;
-        if (until != 0) bodycmd_cancel_local_lock();
+        if (until != 0) {
+            bodycmd_cancel_local_lock();
+            if (relock_at_us) {
+                relock_at_us = 0; // a door opened: they're using the car
+                ESP_LOGI(TAG, "door open after the approach unlock; no relock");
+            }
+        }
         snprintf(response, response_len, "OK");
         return true;
     }

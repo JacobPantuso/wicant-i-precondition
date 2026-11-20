@@ -29,7 +29,18 @@
 #define HISTORY_LEN 10
 #define RECONNECT_LIFE_US 3000000LL
 #define RECONNECT_CONFIRM_US 100000LL
-#define EVENT_LIFE_US 5000000LL
+// Long enough for a phone app woken cold in the background to answer
+// (2026-11-20 10:21). The MAC is single-use and every recheck still applies.
+#define EVENT_LIFE_US 8000000LL
+// An issued event survives the median sitting this far under the level it
+// qualified at: a pocket walk wobbles a few dB around -65 (2026-11-20 10:21).
+#define EVENT_MARGIN_DB 6
+// The phone saw itself come back into a geofence around the parked car from
+// outside it (ATXAUA): real distance, not house jitter. For a while the walk
+// back may then qualify earlier, still only from a floor at FAR_DBM or weaker.
+#define HINT_RISING_DBM (-78)
+#define HINT_GAIN_DB 10
+#define HINT_LIFE_US (5LL * 60 * 1000000)
 #define SAMPLE_LIFE_US 1500000LL
 #define DEFAULT_PERIOD_US 500000LL
 static unsigned mode; // 0 off, 1 detect, 2 unlock. Volatile, reset at boot.
@@ -60,6 +71,10 @@ static int candidate_peak;
 static int raw_signal;
 static int64_t reconnect_until;
 static unsigned reconnect_close_samples;
+static int64_t away_hint_until; // 0 = no geofence hint
+// After a "not started" relock the owner is standing at the car: no new event
+// until the phone has really been away (floor at FAR_DBM) or the link dropped.
+static bool need_away;
 
 static void reset_detection(void) {
     near_since = 0; close_since = 0; sample_at = 0; window_len = 0; history_len = 0;
@@ -122,13 +137,17 @@ static void remember_signal(int value, int64_t now) {
 
 void approach_set_tx_queue(QueueHandle_t *queue) { tx = queue; }
 void approach_departed(void) {
-    departed = true; pending = false; reset_detection(); reset_floor();
+    departed = true; pending = false; need_away = false; reset_detection(); reset_floor();
+}
+void approach_relocked(void) {
+    departed = true; pending = false; need_away = true; reset_detection(); reset_floor();
 }
 void approach_reset_session(void) {
-    departed = false; pending = false; power_ok = false; reset_detection(); reset_floor();
+    departed = false; pending = false; power_ok = false; need_away = false;
+    away_hint_until = 0; reset_detection(); reset_floor();
 }
 bool approach_connected(void) {
-    pending = false; power_ok = false;
+    pending = false; power_ok = false; need_away = false; // the link dropped: they left
     reset_detection(); reset_floor();
     if (!departed || mode == 0) return false;
     connected_at = esp_timer_get_time();
@@ -163,29 +182,37 @@ void approach_sample(int value, bool parked_off, int64_t now) {
         return;
     }
     if (!floor_valid || signal < floor_signal) { floor_signal = signal; floor_valid = true; }
+    if (need_away && floor_signal <= FAR_DBM) need_away = false;
+    bool hinted = away_hint_until && now <= away_hint_until;
+    int rising_dbm = hinted ? HINT_RISING_DBM : RISING_DBM;
+    int rising_gain = hinted ? HINT_GAIN_DB : RISING_GAIN_DB;
     // An issued event lapses on a retreat: the median under its floor, or one
     // raw reading well under it. A single pocket dip does not.
-    if (pending && (signal < event_floor || value < event_floor - RAW_DIP_DB)) pending = false;
+    // The median gets EVENT_MARGIN_DB of slack; one raw reading a real
+    // retreat's distance under the floor still cancels at once.
+    if (pending && (signal < event_floor - EVENT_MARGIN_DB || value < event_floor - RAW_DIP_DB))
+        pending = false;
 
     // The reconnect shortcut has no hold, so every reading it counts must be
     // close on its own, not only the median.
     if (value < NEAR_DBM) reconnect_close_samples = 0;
     bool close = signal >= NEAR_DBM;
-    bool climbing = signal >= RISING_DBM && floor_valid && floor_signal <= FAR_DBM
-        && signal - floor_signal >= RISING_GAIN_DB;
+    bool climbing = signal >= rising_dbm && floor_valid && floor_signal <= FAR_DBM
+        && signal - floor_signal >= rising_gain;
     if (!close) close_since = 0;
     if (!close && !climbing) {
         near_since = 0; fast_candidate = false; reconnect_close_samples = 0;
         remember_signal(signal, now);
         return;
     }
-    if (!mode || !departed) { remember_signal(signal, now); return; }
+    if (!mode || !departed || need_away) { remember_signal(signal, now); return; }
     if (!near_since) {
         near_since = now;
         fast_candidate = rising_from_away(signal, now);
         candidate_peak = signal;
-        ESP_LOGI("approach", "candidate at %d dBm (raw %d), floor %d, %s",
-                 signal, value, floor_signal, fast_candidate ? "rising" : "not rising");
+        ESP_LOGI("approach", "candidate at %d dBm (raw %d), floor %d, %s%s",
+                 signal, value, floor_signal, fast_candidate ? "rising" : "not rising",
+                 hinted ? ", geofence hint" : "");
     }
     if (close && !close_since) close_since = now;
     if (signal > candidate_peak) candidate_peak = signal;
@@ -198,7 +225,8 @@ void approach_sample(int value, bool parked_off, int64_t now) {
     bool rising = fast_candidate && window_len >= 3 && now - near_since >= FAST_DWELL_US;
     bool steady = close_since && window_len >= 3 && now - close_since >= NEAR_DWELL_US;
     if (!reconnect_close && !rising && !steady) return;
-    event_floor = close ? NEAR_DBM : RISING_DBM;
+    event_floor = close ? NEAR_DBM : rising_dbm;
+    away_hint_until = 0; // one event per hint
     ESP_LOGI("approach", "qualified %s at %d dBm after %lld ms; floor %d, peak %d, %lld ms since connect",
              reconnect_close ? "reconnect" : rising ? "rising" : "steady",
              signal, (long long)((now - near_since) / 1000), floor_signal, candidate_peak,
@@ -219,7 +247,7 @@ static bool eligible(void) {
     bodycmd_get_status(&status);
     return !car_in_ready_fresh() && status.lock_requests == event_lock_requests && mode == 2 && pending && power_ok && sample_at != 0
         && now - sample_at <= fresh_life_us() && now - event_at <= EVENT_LIFE_US
-        && signal >= event_floor && raw_signal >= event_floor - RAW_DIP_DB;
+        && signal >= event_floor - EVENT_MARGIN_DB && raw_signal >= event_floor - RAW_DIP_DB;
 }
 bool approach_command(const char *args, char *response, size_t length) {
     if (!*args) {
@@ -231,6 +259,12 @@ bool approach_command(const char *args, char *response, size_t length) {
         }
         snprintf(response, length, "XAU:%u,%lu,%d,%s", mode,
                  (unsigned long)sequence, signal, nonce);
+        return true;
+    }
+    if (args[0] == 'a' && args[1] == 0) {
+        away_hint_until = esp_timer_get_time() + HINT_LIFE_US;
+        ESP_LOGI("approach", "geofence hint: the phone came back from outside");
+        snprintf(response, length, "OK");
         return true;
     }
     if (args[0] == 'm' && args[1] >= '0' && args[1] <= '2' && args[2] == 0) {

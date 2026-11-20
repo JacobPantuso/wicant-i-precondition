@@ -8,6 +8,9 @@
 // Experimental branch only. No standing unlock permission is stored.
 void approach_set_tx_queue(QueueHandle_t *queue);
 void approach_departed(void);
+// A "not started" relock: like a departure, but no event until the phone has
+// really been away or the link dropped.
+void approach_relocked(void);
 void approach_reset_session(void);
 void approach_disconnected(void);
 // Returns true only when a prior departure permits a short reconnect probe.

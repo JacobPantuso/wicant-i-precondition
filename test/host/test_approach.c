@@ -70,7 +70,7 @@ int main(void) {
     reset(); arm(2); sample(-55, true, 5); challenge();
     authenticated = false; CHECK(!answer()); authenticated = true; CHECK(!answer());
     reset(); arm(2); sample(-55, true, 5); challenge();
-    sample(-55, true, 11); CHECK(!answer()); // expired event despite fresh RSSI
+    sample(-55, true, 17); CHECK(!answer()); // expired event (8 s) despite fresh RSSI
     reset(); arm(2); sample(-55, true, 5); challenge();
     body.busy = true; CHECK(!answer() && !unlock_count);
     reset(); arm(2); sample(-55, true, 5); challenge(); ready = true; CHECK(!answer()); ready = false;
@@ -179,10 +179,38 @@ int main(void) {
     for (int i = 0; i < 40; i++) sample(i % 3 == 0 ? -82 : i % 3 == 1 ? -72 : -76, true, 1);
     CHECK(!pending && !notifications);
 
-    // A rising-band event lapses once the median falls back under -75.
+    // A rising-band event lapses once the median falls back past -75 by more
+    // than the pocket margin (EVENT_MARGIN_DB).
     reset(); arm(2); sample(-95, true, 6); sample(-78, true, 2); sample(-72, true, 4);
     CHECK(pending && event_floor == RISING_DBM);
-    sample(-80, true, 2); challenge(); CHECK(!answer());
+    sample(-84, true, 2); challenge(); CHECK(!answer());
+    // ...but a median a few dB under it, walking with the phone in a pocket, keeps it.
+    reset(); arm(2); sample(-95, true, 6); sample(-78, true, 2); sample(-72, true, 4);
+    CHECK(pending); sample(-79, true, 2); challenge(); CHECK(answer());
+
+    // Geofence hint: the phone came back from outside the fence. A walk back
+    // from -86 that only climbs 12 dB (2026-11-20 10:21) qualifies at -78
+    // instead of waiting for -65; without the hint it doesn't.
+    reset(); arm(2); sample(-86, true, 6); sample(-80, true, 2); sample(-74, true, 4);
+    CHECK(!pending);
+    reset(); arm(2); CHECK(approach_command("a", response, sizeof response));
+    sample(-86, true, 6); sample(-80, true, 2); sample(-74, true, 4);
+    CHECK(pending && event_floor == HINT_RISING_DBM && !away_hint_until);
+    // The hint never helps house jitter: it still needs a far floor.
+    reset(); arm(2); CHECK(approach_command("a", response, sizeof response));
+    for (int i = 0; i < 40; i++) sample(i % 3 == 0 ? -82 : i % 3 == 1 ? -72 : -76, true, 1);
+    CHECK(!pending);
+    // A drive clears it.
+    reset(); arm(2); CHECK(approach_command("a", response, sizeof response));
+    approach_reset_session(); CHECK(!away_hint_until);
+
+    // After a "not started" relock the owner is at the car: standing there
+    // never re-unlocks. Walking away (a far floor) or a dropped link re-arms it.
+    reset(); arm(2); approach_relocked(); sample(-60, true, 10); CHECK(!pending);
+    sample(-90, true, 4); sample(-60, true, 6); CHECK(pending);
+    reset(); arm(2); approach_relocked(); approach_disconnected(); CHECK(approach_connected());
+    fake_now += 120000; approach_sample(-61, true, fake_now);
+    fake_now += 120000; approach_sample(-60, true, fake_now); CHECK(pending);
 
     // At Home, standby reads every 2 s: those are not gaps and can qualify.
     reset(); arm(2); approach_set_sample_period(2000000);

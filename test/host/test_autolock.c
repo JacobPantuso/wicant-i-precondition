@@ -3,7 +3,9 @@
 #include "test_support.h"
 #include "autolock.c"
 void approach_set_tx_queue(QueueHandle_t *q) {}
-void approach_departed(void) {}
+static int departed_calls, relocked_calls;
+void approach_departed(void) { departed_calls++; }
+void approach_relocked(void) { relocked_calls++; }
 void approach_reset_session(void) {}
 void approach_disconnected(void) {}
 static bool reconnect_permitted;
@@ -42,6 +44,7 @@ static void reset(void) {
     enabled = true; armed = false; ready_seen = false; obd_off = false;
     parked = false; connected = true; hold_until_us = 0; verify_until_us = 0;
     hold_until_ms = 0; count = 0; disconnected_at_us = 0; frame_ready_last = false; reset_signal();
+    grace_until_us = relock_at_us = 0; relock_in_flight = false; departed_calls = relocked_calls = 0;
 }
 static void off_after_drive(void) { command("p1"); command("p0"); CHECK(armed); }
 int main(void) {
@@ -69,6 +72,11 @@ int main(void) {
     autolock_approach_unlocked(); CHECK(armed && !smoothed_valid);
     for (int i = 0; i < 5; i++) { fake_now += 500000; sample(-63, fake_now); }
     CHECK(armed && requests == 0);
+    // The walk back isn't over for 15 s: a dip right after the unlock never
+    // relocks behind the owner (2026-11-20 10:25: -73 unlock, -84 relock).
+    for (int i = 0; i < 12; i++) { fake_now += 500000; sample(-95, fake_now); }
+    CHECK(requests == 0);
+    fake_now = grace_until_us;
     for (int i = 0; i < 12; i++) { fake_now += 500000; sample(-95, fake_now); }
     CHECK(requests == 1);
     reset(); autolock_approach_unlocked(); CHECK(!armed); // no parked/off authorization
@@ -90,6 +98,25 @@ int main(void) {
     // A reconnect with no departure behind it keeps the normal cadence.
     reset(); off_after_drive(); reconnect_permitted = false;
     autolock_note_connected(); autolock_tick(); CHECK(rssi_next_us - fake_now == RSSI_PERIOD_US);
+    // Not started 30 s after an approach unlock: relock, once, and tell
+    // approach the owner is at the car rather than gone.
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked();
+    fake_now += 29000000; autolock_tick(); CHECK(requests == 0);
+    fake_now += 1000000; autolock_tick(); CHECK(requests == 1 && relock_in_flight);
+    fake_body.locks_completed = 1; autolock_tick();
+    CHECK(relocked_calls == 1 && !relock_in_flight && last == RESULT_LOCKED);
+    fake_now += 60000000; autolock_tick(); CHECK(requests == 1); // only once
+    // Started in time: no relock.
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked();
+    fake_ready = fake_frame_ready = true; fake_now += 31000000; autolock_tick();
+    CHECK(requests == 0 && !relock_at_us);
+    // A door reported open: they're using the car; no relock.
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked();
+    command("b1"); fake_now += 31000000; autolock_tick(); CHECK(requests == 0 && !relock_at_us);
+    // A new drive's departure clears the leftover approach grace.
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked(); CHECK(grace_until_us);
+    command("p1"); command("p0"); CHECK(armed && !grace_until_us && !relock_at_us);
+
     // An explicit not-READY frame after a drive arms on its own: the owner
     // can walk off before the phone's OBD read lands (2026-11-18 19:05).
     reset(); fake_ready = fake_frame_ready = true; autolock_tick(); CHECK(!armed);
