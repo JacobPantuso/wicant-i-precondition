@@ -45,6 +45,7 @@ static void reset(void) {
     parked = false; connected = true; hold_until_us = 0; verify_until_us = 0;
     hold_until_ms = 0; count = 0; disconnected_at_us = 0; frame_ready_last = false; reset_signal();
     grace_until_us = relock_at_us = 0; relock_in_flight = false; departed_calls = relocked_calls = 0;
+    hold_set_us = ready_off_us = 0;
 }
 static void off_after_drive(void) { command("p1"); command("p0"); CHECK(armed); }
 int main(void) {
@@ -138,6 +139,19 @@ int main(void) {
     for (int i = 0; i < 3; i++) { fake_now += 500000; sample(-87, fake_now); }
     CHECK(requests == 1);
     threshold = -85;
+
+    // A hold from the drive ("car on") is stale once the bus says not-READY:
+    // it lapses 15 s later and the gone phone locks (2026-11-20 16:54, 43 s).
+    reset(); fake_ready = fake_frame_ready = true; autolock_tick(); command("b1");
+    fake_now += 1000000; fake_ready = fake_frame_ready = false; autolock_tick(); CHECK(armed);
+    autolock_note_disconnected(); fake_now += 6000000; autolock_tick(); CHECK(requests == 0);
+    fake_now += 8000000; autolock_tick(); CHECK(requests == 0 && hold_until_ms != 0);
+    fake_now += 1500000; autolock_tick(); CHECK(requests == 1 && hold_until_ms == 0);
+    // A hold the app sends after the switch-off (door open, still buckled) stays.
+    reset(); fake_ready = fake_frame_ready = true; autolock_tick();
+    fake_now += 1000000; fake_ready = fake_frame_ready = false; autolock_tick();
+    fake_now += 1000000; command("b1"); autolock_note_disconnected();
+    fake_now += 20000000; autolock_tick(); CHECK(requests == 0 && hold_until_ms != 0);
 
     // An explicit not-READY frame after a drive arms on its own: the owner
     // can walk off before the phone's OBD read lands (2026-11-18 19:05).

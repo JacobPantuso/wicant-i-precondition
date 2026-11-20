@@ -86,6 +86,11 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 #define NEAR_HOLD_US    (2LL * 1000 * 1000)
 #define BLOCK_MS        30000U
 #define HOLD_LAPSE_US   (30LL * 1000 * 1000)      // hold lapses once the phone is gone this long
+// A hold the app set while the car was still on ("car on", a belt during the
+// drive) is stale once the bus says not-READY. It kept the WiCAN from
+// locking for 43 s while the phone came and went (2026-11-20 16:54). Unless
+// the app sends a fresh one after the switch-off, it lapses this long after.
+#define STALE_HOLD_US   (15LL * 1000 * 1000)
 #define SMOOTHING       0.6f
 // After an approach unlock: no walk-away lock for a while, so the last
 // metres of a walk back can't relock behind the owner (unlocked at -73,
@@ -138,6 +143,8 @@ static volatile uint32_t hold_until_ms; // the app's hold; 0 = none
 static bool was_blocked;
 static int64_t disconnected_at_us; // 0 while the phone is connected
 static bool frame_ready_last;      // car_in_ready() at the previous tick
+static int64_t hold_set_us;        // when the app last set its hold (ATXALB1)
+static int64_t ready_off_us;       // when the bus last said not-READY; 0 = on/unknown
 static int64_t grace_until_us;     // 0 = no post-approach grace
 static int64_t relock_at_us;       // 0 = no "not started" relock pending
 static bool relock_in_flight;      // the burst being verified is that relock
@@ -423,6 +430,7 @@ void autolock_tick(void)
     bool frame_ready = car_in_ready();
     bool frame_fell = frame_ready_last && !frame_ready;
     frame_ready_last = frame_ready;
+    if (frame_fell) ready_off_us = now;   // whichever path arms, holds before this are stale
     if (ready) {
         standby_note_drive();
         approach_reset_session();
@@ -432,6 +440,7 @@ void autolock_tick(void)
         armed = false;
         grace_until_us = 0;
         relock_at_us = 0; // started: no "not started" relock
+        ready_off_us = 0;
         bodycmd_cancel_local_lock();
         hold_until_us = 0;
         reset_signal();
@@ -486,6 +495,18 @@ void autolock_tick(void)
             ESP_LOGI(TAG, "the app reports a door open or someone seated; not locking");
         } else {
             fire("phone gone for 5 s");
+        }
+    }
+
+    // A hold from before the switch-off lapses 15 s after it. A fresh hold
+    // sent since (door open, still buckled) is kept.
+    if (hold_until_ms != 0 && ready_off_us != 0 && hold_set_us < ready_off_us
+            && now - ready_off_us >= STALE_HOLD_US) {
+        hold_until_ms = 0;
+        ESP_LOGI(TAG, "hold from before the switch-off lapsed");
+        if (enabled && armed && obd_off && !ready && !connected && hold_until_us == 0
+                && verify_until_us == 0 && unlockauth_has_key()) {
+            fire("phone gone, stale hold lapsed");
         }
     }
 
@@ -655,6 +676,7 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
         }
         hold_until_ms = until;
         if (until != 0) {
+            hold_set_us = esp_timer_get_time();
             bodycmd_cancel_local_lock();
             if (relock_at_us) {
                 relock_at_us = 0; // a door opened: they're using the car
