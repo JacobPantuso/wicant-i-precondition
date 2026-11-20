@@ -75,6 +75,11 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 #define RETURN_PERIOD_US (250LL * 1000)
 #define RETURN_WINDOW_US (60LL * 1000 * 1000)
 #define SIGNAL_HOLD_US  (3LL * 1000 * 1000)
+// A short line sits a couple of metres from the car, where 3 s of walking put
+// the lock ~5 m past it (2026-11-20 15:07, locked at -92). Lines this close
+// or closer hold for 1.5 s instead.
+#define SHORT_LINE_DBM  (-75)
+#define SHORT_HOLD_US   (1500LL * 1000)
 #define QUICK_HOLD_US   (1LL * 1000 * 1000)
 #define QUICK_MARGIN_DB 6
 #define NEAR_MARGIN_DB  10
@@ -318,6 +323,11 @@ void autolock_approach_unlocked(void)
 
 // One link RSSI reading while parked: smooth it, then lock when armed and
 // the phone is away, or arm again when it's back after a lock.
+static int64_t signal_hold_us(void)
+{
+    return threshold >= SHORT_LINE_DBM ? SHORT_HOLD_US : SIGNAL_HOLD_US;
+}
+
 static void sample(int rssi, int64_t now)
 {
     bool blocked = app_holds();
@@ -350,7 +360,10 @@ static void sample(int rssi, int64_t now)
 
     if (armed) {
         away_since = smoothed <= threshold ? (away_since ? away_since : now) : 0;
-        quick_since = smoothed <= threshold - QUICK_MARGIN_DB ? (quick_since ? quick_since : now) : 0;
+        // Well past the line, the median alone decides: the moving average
+        // lags a clear walk-off by about half a second. The median of three
+        // still ignores a single dip.
+        quick_since = median <= threshold - QUICK_MARGIN_DB ? (quick_since ? quick_since : now) : 0;
         if (blocked || verify_until_us != 0 || !unlockauth_has_key()) {
             return;
         }
@@ -360,7 +373,7 @@ static void sample(int rssi, int64_t now)
             return;
         }
         bool quick = quick_since && now - quick_since >= QUICK_HOLD_US;
-        bool held = away_since && now - away_since >= SIGNAL_HOLD_US;
+        bool held = away_since && now - away_since >= signal_hold_us();
         if (quick || held) {
             char why[48];
             snprintf(why, sizeof(why), "phone at %d dBm (line %d)", (int)smoothed, threshold);
@@ -493,7 +506,13 @@ void autolock_tick(void)
     // the next departure then.
     if (relock_at_us && now >= relock_at_us) {
         relock_at_us = 0;
-        if (enabled && parked && obd_off && !ready && verify_until_us == 0
+        // The phone right at the car means they're in it or beside it, a door
+        // the app hasn't read yet (2026-11-20 14:28: relocked at -49 with the
+        // owner seated). The walk-away lock covers their leaving instead.
+        bool at_car = connected && smoothed_valid && smoothed >= threshold + NEAR_MARGIN_DB;
+        if (at_car) {
+            ESP_LOGI(TAG, "approach relock skipped: phone at the car (%d dBm)", (int)smoothed);
+        } else if (enabled && parked && obd_off && !ready && verify_until_us == 0
                 && !app_holds() && unlockauth_has_key()) {
             relock_in_flight = true;
             fire("not started within 30 s of the approach unlock");

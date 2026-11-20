@@ -117,6 +117,28 @@ int main(void) {
     reset(); off_after_drive(); armed = false; autolock_approach_unlocked(); CHECK(grace_until_us);
     command("p1"); command("p0"); CHECK(armed && !grace_until_us && !relock_at_us);
 
+    // Relock skipped with the phone at the car: they're in it or beside it,
+    // with a door the app hasn't read yet (2026-11-20 14:28, -49 dBm).
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked();
+    for (int i = 0; i < 8; i++) { fake_now += 500000; sample(-55, fake_now); }
+    fake_now = relock_at_us; autolock_tick(); CHECK(requests == 0 && !relock_at_us);
+    // ...but a phone that went quiet (link down) still gets the relock.
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked();
+    for (int i = 0; i < 8; i++) { fake_now += 500000; sample(-55, fake_now); }
+    connected = false; fake_now = relock_at_us; autolock_tick(); CHECK(requests == 1);
+
+    // A Short line (-72) holds 1.5 s, not 3: just past it, a lock by 2 s.
+    reset(); threshold = -72; off_after_drive();
+    for (int i = 0; i < 5; i++) { fake_now += 500000; sample(-74, fake_now); }
+    CHECK(requests == 1);
+    // A Medium line (-85) keeps the 3 s hold for the same shallow margin.
+    reset(); threshold = -85; off_after_drive();
+    for (int i = 0; i < 5; i++) { fake_now += 500000; sample(-87, fake_now); }
+    CHECK(requests == 0);
+    for (int i = 0; i < 3; i++) { fake_now += 500000; sample(-87, fake_now); }
+    CHECK(requests == 1);
+    threshold = -85;
+
     // An explicit not-READY frame after a drive arms on its own: the owner
     // can walk off before the phone's OBD read lands (2026-11-18 19:05).
     reset(); fake_ready = fake_frame_ready = true; autolock_tick(); CHECK(!armed);

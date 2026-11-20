@@ -174,6 +174,24 @@ int main(void) {
     reset(); arm(2); sample(-60, true, 5); CHECK(pending);
     challenge(); sample(-72, true, 1); CHECK(answer() && unlock_count == 1);
 
+    // A steady pocket walk back at ~1 dB/s (2026-11-20 14:28 waited for -53):
+    // the slow-climb rule fires in the -75 band, before the -65 door rule.
+    reset(); arm(2); approach_disconnected(); CHECK(approach_connected());
+    fake_now += RECONNECT_LIFE_US + 1;
+    approach_set_sample_period(250000);
+    {
+        int fired_at = -1, fired_signal = 0;
+        for (int i = 0; i < 8; i++) { fake_now += 250000; approach_sample(-96, true, fake_now); }
+        for (int i = 0; i < 160 && fired_at < 0; i++) {
+            int level = -92 + i / 4;                       // +1 dB per second
+            int wobble = (i % 3 == 0) ? -2 : (i % 3 == 1) ? 1 : 0;
+            fake_now += 250000; approach_sample(level + wobble, true, fake_now);
+            if (pending) { fired_at = i; fired_signal = signal; }
+        }
+        CHECK(fired_at >= 0 && fired_signal < NEAR_DBM && fired_signal >= RISING_DBM - 2);
+    }
+    approach_set_sample_period(500000);
+
     // Jitter in the house never had a far floor: no rising-band event.
     reset(); arm(2);
     for (int i = 0; i < 40; i++) sample(i % 3 == 0 ? -82 : i % 3 == 1 ? -72 : -76, true, 1);

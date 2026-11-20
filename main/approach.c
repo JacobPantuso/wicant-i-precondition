@@ -26,7 +26,14 @@
 // One raw reading may sit this far under the event's floor without voiding an
 // issued challenge (pocket/body dips); a real retreat goes further.
 #define RAW_DIP_DB 10
-#define HISTORY_LEN 10
+// About 8 s of history at any sample rate: one entry per HISTORY_STEP_US.
+// Ten raw entries covered only 2.5 s at the 250 ms return rate, too short
+// for the 4 s look-back below (2026-11-20 14:28).
+#define HISTORY_LEN 16
+#define HISTORY_STEP_US 450000LL
+// A steady walk with the phone in a pocket climbs ~1 dB/s: this much over
+// 4-8 s also counts as walking back (2026-11-20 14:28 waited for -53).
+#define SLOW_RISE_DB 6
 #define RECONNECT_LIFE_US 3000000LL
 #define RECONNECT_CONFIRM_US 100000LL
 // Long enough for a phone app woken cold in the background to answer
@@ -117,16 +124,19 @@ static int median_sample(int value) {
 }
 
 static bool rising_from_away(int value, int64_t now) {
-    unsigned supporting = 0;
+    unsigned fast = 0, slow = 0;
     for (unsigned i = 0; i < history_len; i++) {
         int64_t age = now - history[i].at;
         if (age >= 1500000LL && age <= 4000000LL
-            && value - history[i].value >= FAST_RISE_DB) supporting++;
+            && value - history[i].value >= FAST_RISE_DB) fast++;
+        if (age > 4000000LL && age <= 8000000LL
+            && value - history[i].value >= SLOW_RISE_DB) slow++;
     }
-    return supporting >= 2;
+    return fast >= 2 || slow >= 2;
 }
 
 static void remember_signal(int value, int64_t now) {
+    if (history_len && now - history[history_len - 1].at < HISTORY_STEP_US) return;
     if (history_len == HISTORY_LEN) {
         memmove(history, history + 1, (HISTORY_LEN - 1) * sizeof(history[0]));
         history_len--;
@@ -213,6 +223,12 @@ void approach_sample(int value, bool parked_off, int64_t now) {
         ESP_LOGI("approach", "candidate at %d dBm (raw %d), floor %d, %s%s",
                  signal, value, floor_signal, fast_candidate ? "rising" : "not rising",
                  hinted ? ", geofence hint" : "");
+    }
+    // A slow walk may only show its climb once already in the band.
+    if (!fast_candidate && climbing && rising_from_away(signal, now)) {
+        fast_candidate = true;
+        candidate_peak = signal;
+        ESP_LOGI("approach", "steady climb at %d dBm, floor %d", signal, floor_signal);
     }
     if (close && !close_since) close_since = now;
     if (signal > candidate_peak) candidate_peak = signal;
