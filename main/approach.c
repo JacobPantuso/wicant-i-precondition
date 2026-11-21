@@ -34,6 +34,10 @@
 // A steady walk with the phone in a pocket climbs ~1 dB/s: this much over
 // 4-8 s also counts as walking back (2026-11-20 14:28 waited for -53).
 #define SLOW_RISE_DB 6
+// A withdrawn offer (the walk dipped, or it expired unanswered) gets another
+// chance as the owner keeps walking: one lapse used to end the departure's
+// approach for good (2026-11-21 10:16, -73 then -84). Capped per departure.
+#define MAX_EVENTS_PER_DEPARTURE 3
 #define RECONNECT_LIFE_US 3000000LL
 #define RECONNECT_CONFIRM_US 100000LL
 // Long enough for a phone app woken cold in the background to answer
@@ -82,6 +86,7 @@ static int64_t away_hint_until; // 0 = no geofence hint
 // After a "not started" relock the owner is standing at the car: no new event
 // until the phone has really been away (floor at FAR_DBM) or the link dropped.
 static bool need_away;
+static unsigned events_this_departure;
 
 static void reset_detection(void) {
     near_since = 0; close_since = 0; sample_at = 0; window_len = 0; history_len = 0;
@@ -147,10 +152,23 @@ static void remember_signal(int value, int64_t now) {
 
 void approach_set_tx_queue(QueueHandle_t *queue) { tx = queue; }
 void approach_departed(void) {
-    departed = true; pending = false; need_away = false; reset_detection(); reset_floor();
+    departed = true; pending = false; need_away = false; events_this_departure = 0;
+    reset_detection(); reset_floor();
 }
 void approach_relocked(void) {
-    departed = true; pending = false; need_away = true; reset_detection(); reset_floor();
+    departed = true; pending = false; need_away = true; events_this_departure = 0;
+    reset_detection(); reset_floor();
+}
+
+// The pending offer lapsed without an answer: watch for the next approach,
+// keeping the far floor, unless this departure has used its offers.
+static void lapse_pending(const char *why) {
+    pending = false;
+    if (events_this_departure < MAX_EVENTS_PER_DEPARTURE) {
+        departed = true;
+        near_since = 0; close_since = 0; fast_candidate = false;
+        ESP_LOGI("approach", "offer lapsed (%s); watching for another approach", why);
+    }
 }
 void approach_reset_session(void) {
     departed = false; pending = false; power_ok = false; need_away = false;
@@ -201,7 +219,9 @@ void approach_sample(int value, bool parked_off, int64_t now) {
     // The median gets EVENT_MARGIN_DB of slack; one raw reading a real
     // retreat's distance under the floor still cancels at once.
     if (pending && (signal < event_floor - EVENT_MARGIN_DB || value < event_floor - RAW_DIP_DB))
-        pending = false;
+        lapse_pending("signal fell back");
+    else if (pending && now - event_at > EVENT_LIFE_US)
+        lapse_pending("expired unanswered");
 
     // The reconnect shortcut has no hold, so every reading it counts must be
     // close on its own, not only the median.
@@ -247,7 +267,8 @@ void approach_sample(int value, bool parked_off, int64_t now) {
              reconnect_close ? "reconnect" : rising ? "rising" : "steady",
              signal, (long long)((now - near_since) / 1000), floor_signal, candidate_peak,
              connected_at ? (long long)((now - connected_at) / 1000) : -1LL);
-    departed = false; // One event per departure, even in detection-only mode.
+    departed = false; // One live event at a time, even in detection-only mode.
+    events_this_departure++;
     pending = mode == 2;
     event_at = now;
     sequence++;

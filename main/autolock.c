@@ -19,7 +19,7 @@
 // Guards: never while the car is in READY. Doors and seats live on the
 // diagnostic bus, out of reach here, so the app forwards its OBD reading as
 // a hold (ATXALB1). While the phone is connected only its fresh clear
-// releases it (ATXALB0). Once the phone's link has been gone for 30 s the
+// releases it (ATXALB0). Once the phone's link has been gone for 10 s the
 // hold lapses, as the original firmware's hold did: a phone that walked off
 // before its clear arrived otherwise left the car unlocked for good
 // (2026-11-16 16:28). If still armed, the disconnect lock fires then.
@@ -85,7 +85,9 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 #define NEAR_MARGIN_DB  10
 #define NEAR_HOLD_US    (2LL * 1000 * 1000)
 #define BLOCK_MS        30000U
-#define HOLD_LAPSE_US   (30LL * 1000 * 1000)      // hold lapses once the phone is gone this long
+// A door/seat hold lapses once the phone is gone this long. 30 s held a
+// closed door's stale "open" past the owner's walk-off (2026-11-21 09:19).
+#define HOLD_LAPSE_US   (10LL * 1000 * 1000)
 // A hold the app set while the car was still on ("car on", a belt during the
 // drive) is stale once the bus says not-READY. It kept the WiCAN from
 // locking for 43 s while the phone came and went (2026-11-20 16:54). Unless
@@ -515,7 +517,7 @@ void autolock_tick(void)
     if (hold_until_ms != 0 && !connected && disconnected_at_us != 0
             && now - disconnected_at_us >= HOLD_LAPSE_US) {
         hold_until_ms = 0;
-        ESP_LOGI(TAG, "phone gone for 30 s; door/seat hold lapsed");
+        ESP_LOGI(TAG, "phone gone for 10 s; door/seat hold lapsed");
         if (enabled && armed && obd_off && !ready && hold_until_us == 0
                 && verify_until_us == 0 && unlockauth_has_key()) {
             fire("phone gone, hold lapsed");

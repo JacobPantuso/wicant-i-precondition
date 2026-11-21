@@ -141,17 +141,23 @@ int main(void) {
     threshold = -85;
 
     // A hold from the drive ("car on") is stale once the bus says not-READY:
-    // it lapses 15 s later and the gone phone locks (2026-11-20 16:54, 43 s).
+    // it lapses 15 s later even with the phone still connected, so the
+    // signal path can lock (2026-11-20 16:54, 43 s).
     reset(); fake_ready = fake_frame_ready = true; autolock_tick(); command("b1");
     fake_now += 1000000; fake_ready = fake_frame_ready = false; autolock_tick(); CHECK(armed);
-    autolock_note_disconnected(); fake_now += 6000000; autolock_tick(); CHECK(requests == 0);
-    fake_now += 8000000; autolock_tick(); CHECK(requests == 0 && hold_until_ms != 0);
-    fake_now += 1500000; autolock_tick(); CHECK(requests == 1 && hold_until_ms == 0);
-    // A hold the app sends after the switch-off (door open, still buckled) stays.
+    fake_now += 14000000; autolock_tick(); CHECK(hold_until_ms != 0);
+    fake_now += 1500000; autolock_tick(); CHECK(hold_until_ms == 0 && requests == 0);
+    // A hold the app sends after the switch-off (door open, still buckled)
+    // isn't stale: with the phone there it stays.
     reset(); fake_ready = fake_frame_ready = true; autolock_tick();
     fake_now += 1000000; fake_ready = fake_frame_ready = false; autolock_tick();
-    fake_now += 1000000; command("b1"); autolock_note_disconnected();
-    fake_now += 20000000; autolock_tick(); CHECK(requests == 0 && hold_until_ms != 0);
+    fake_now += 1000000; command("b1");
+    fake_now += 30000000; autolock_tick(); CHECK(requests == 0 && hold_until_ms != 0);
+    // ...and with the phone gone it lapses 10 s later and locks (a closed
+    // door's stale "open" outlived the walk-off by 30 s, 2026-11-21 09:19).
+    autolock_note_disconnected();
+    fake_now += 8000000; autolock_tick(); CHECK(requests == 0 && hold_until_ms != 0);
+    fake_now += 3000000; autolock_tick(); CHECK(requests == 1 && hold_until_ms == 0);
 
     // An explicit not-READY frame after a drive arms on its own: the owner
     // can walk off before the phone's OBD read lands (2026-11-18 19:05).

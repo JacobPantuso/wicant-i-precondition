@@ -152,24 +152,25 @@ int main(void) {
     CHECK(lock_requests == before + 1);
 
     // Hold lapse. A hold sent while connected survives the 5 s disconnect
-    // check, then lapses 30 s after the link drops and the lock fires
-    // (2026-11-16 16:28: the phone walked off before its clear arrived).
+    // check, then lapses 10 s after the link drops and the lock fires
+    // (2026-11-16 16:28: the phone walked off before its clear arrived;
+    // 30 s outlived the walk-off, 2026-11-21 09:19).
     direct_managed = false;
     start_parked_cycle(); connected(); radio_signal = -60; advance(1000);
     command("b1"); before = lock_requests;
     disconnected(); advance(6000);
     CHECK(lock_requests == before);                  // 5 s check: held
-    advance(23000); CHECK(lock_requests == before);  // 29 s gone: still held
-    advance(1500);  CHECK(lock_requests == before + 1);
+    advance(3000); CHECK(lock_requests == before);   // 9 s gone: still held
+    advance(1500); CHECK(lock_requests == before + 1);
     // Connected, the hold never lapses on time alone: the phone is there to
     // send its own clear.
     start_parked_cycle(); connected(); radio_signal = -60; advance(1000);
     command("b1"); before = lock_requests; advance(60000);
     CHECK(lock_requests == before);
-    // A reconnect inside the 30 s restarts the clock; the hold stays.
-    disconnected(); advance(20000); connected(); advance(1000);
-    disconnected(); advance(20000); CHECK(lock_requests == before);
-    advance(11000); CHECK(lock_requests == before + 1);
+    // A reconnect inside the 10 s restarts the clock; the hold stays.
+    disconnected(); advance(8000); connected(); advance(1000);
+    disconnected(); advance(8000); CHECK(lock_requests == before);
+    advance(3000); CHECK(lock_requests == before + 1);
     // Car back on: the lapse never fires a lock.
     start_parked_cycle(); connected(); advance(1000); command("b1");
     before = lock_requests; disconnected(); advance(3000); ready = true;

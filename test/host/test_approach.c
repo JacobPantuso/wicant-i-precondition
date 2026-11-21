@@ -192,6 +192,22 @@ int main(void) {
     }
     approach_set_sample_period(500000);
 
+    // A withdrawn offer gets another chance as the owner keeps walking
+    // (2026-11-21 10:16: -73, then -84 before the phone answered).
+    reset(); arm(2); sample(-95, true, 6); sample(-60, true, 5); CHECK(pending);
+    uint32_t first = sequence;
+    sample(-90, true, 1); CHECK(!pending && departed);   // fell back: lapsed, still watching
+    sample(-60, true, 6); CHECK(pending && sequence == first + 1);
+    challenge(); CHECK(answer() && unlock_count == 1);
+    // Unanswered offers expire into another chance too, up to three per departure.
+    reset(); arm(2); sample(-95, true, 6);
+    for (int n = 0; n < 3; n++) {
+        sample(-60, true, 6); CHECK(pending);
+        sample(-60, true, 18);                            // > 8 s, never answered
+    }
+    CHECK(!pending && !departed);                         // offers used up
+    sample(-60, true, 10); CHECK(!pending);
+
     // Jitter in the house never had a far floor: no rising-band event.
     reset(); arm(2);
     for (int i = 0; i < 40; i++) sample(i % 3 == 0 ? -82 : i % 3 == 1 ? -72 : -76, true, 1);
