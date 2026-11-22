@@ -58,6 +58,7 @@
 #include "hw_config.h"
 #include "math.h"
 #include "dev_status.h"
+#include "standby.h"
 #include "precondition.h"
 
 #define TAG 			  __func__
@@ -382,6 +383,7 @@ static void adc_task(void *pvParameters)
     	ret = read_ss_adc_voltage(&battery_voltage, voltage_adc_ch);
 		if(ret != ESP_OK)
 		{
+			standby_note_voltage(0, false);	// standby counts a missing reading as low
 			ESP_LOGE(TAG, "read_ss_adc_voltage error");
 			vTaskDelay(pdMS_TO_TICKS(1000));
 			continue;
@@ -401,6 +403,7 @@ static void adc_task(void *pvParameters)
     	battery_voltage += VBAT_READ_OFFSET_V;
 
     	xQueueOverwrite( voltage_queue, &battery_voltage );
+    	standby_note_voltage(battery_voltage, true);
 
         // Car-off sleep (mode 2) uses the same setpoint as low-voltage sleep,
         // but a car that looks "on" inhibits sleeping and forces a wake. The
@@ -439,7 +442,35 @@ static void adc_task(void *pvParameters)
             sleep_wanted = (battery_voltage < sleep_voltage) && !car_awake;
             awake_wanted = (battery_voltage > sleep_voltage) || car_awake;
         }
-    	if(enable_sleep == 1 || enable_sleep == 2)
+
+        // Parked BLE standby (standby.c). While parked it holds the voltage
+        // sleep off so the phone can still reach WiCAN for the approach
+        // unlock. When its 48 h budget or the battery floor ends it, sleep
+        // at once, whatever the Sleep Mode setting: with Sleep Mode off the
+        // battery setpoint still decides when to wake (a running car).
+        bool protect = standby_protect_requested();
+        if(protect)
+        {
+            if(enable_sleep == 0)
+            {
+                awake_wanted = battery_voltage > sleep_voltage;
+            }
+            if(sleep_state == RUN_STATE || sleep_state == SLEEP_DETECTED)
+            {
+                ESP_LOGW(TAG, "standby ended: protective sleep, vbatt=%.2f", battery_voltage);
+                sleep_state = SLEEP_STATE;
+            }
+        }
+        else if(standby_holds_awake())
+        {
+            sleep_wanted = false;
+            if(sleep_state == SLEEP_DETECTED)
+            {
+                ESP_LOGI(TAG, "parked standby: voltage sleep held off");
+                sleep_state = RUN_STATE;
+            }
+        }
+    	if(enable_sleep == 1 || enable_sleep == 2 || protect)
     	{
 			switch(sleep_state)
 			{

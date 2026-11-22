@@ -392,8 +392,8 @@ static void can_rx_task(void *pvParameters)
             precondition_push_status(ble_connected());
             sniff_tick(precondition_tick_last, ble_connected());
             clusternav_tick(precondition_tick_last, ble_connected());
-            bodycmd_tick(ble_connected());
             autolock_tick();
+            bodycmd_tick(ble_connected());
         }
         // every pass, not the 40 ms tick: multi-frame messages go out ~5 ms apart
         clusternav_poll(esp_timer_get_time());
@@ -883,6 +883,14 @@ void app_main(void)
 	// portMAX_DELAY);/* Wait forever. */  
 	// esp_log_level_set("*", ESP_LOG_NONE);
 	esp_log_level_set("*", ESP_LOG_WARN);
+	// The lock and unlock decisions stay visible on the USB console: they
+	// are a few lines per event, and without them a desk or field log can't
+	// tell why a walk-away did or didn't lock (2026-11-16).
+	esp_log_level_set("autolock", ESP_LOG_INFO);
+	esp_log_level_set("approach", ESP_LOG_INFO);
+	esp_log_level_set("standby", ESP_LOG_INFO);
+	esp_log_level_set("obd_handoff", ESP_LOG_INFO);
+	esp_log_level_set("adc_task", ESP_LOG_INFO);
 	// esp_log_level_set("autopid_parser", ESP_LOG_ERROR);
 	// esp_log_level_set("autopid_task", ESP_LOG_ERROR);
 	// esp_log_level_set("elm327_process_cmd", ESP_LOG_ERROR);

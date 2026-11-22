@@ -42,6 +42,9 @@
 #include "clusternav.h"
 #include "bodycmd.h"
 #include "autolock.h"
+#include "obd_handoff.h"
+#include "approach.h"
+#include "standby.h"
 #include "update_mode.h"
 #include "ble_ota.h"
 #include "unlockauth.h"
@@ -1309,6 +1312,33 @@ void elm327_set_ble_queue(QueueHandle_t *q)
 	ble_reply_queue = q;
 }
 
+// BLE-only direct OBD ownership lease. Never exposed over the WiFi socket.
+static char* elm327_obd_handoff(const char* command_str)
+{
+    static char response[112];
+    if (!cmd_from_ble) return NULL;
+    if (!obd_handoff_command(&command_str[3],response,sizeof(response))) return NULL;
+    return response;
+}
+
+// Parked BLE standby control and diagnostics (see standby.h). BLE only.
+static char* elm327_standby(const char* command_str)
+{
+    static char response[112];
+    if (!cmd_from_ble) return NULL;
+    if (!standby_command(&command_str[3], response, sizeof(response))) return NULL;
+    return response;
+}
+
+// Experimental approach surface is BLE-only and authenticated per unlock.
+static char* elm327_approach(const char* command_str)
+{
+    static char response[80];
+    if (!cmd_from_ble) return NULL;
+    if (!approach_command(&command_str[3], response, sizeof(response))) return NULL;
+    return response;
+}
+
 /*
  * ATXUL - door unlock (see bodycmd.c and unlockauth.h). Also a vendor
  * extension; see ATXPC above for why the "x" prefix is safe. BLE only.
@@ -1519,7 +1549,10 @@ const xelm327_cmd_t elm327_commands[] = {
 											{"xnt", elm327_cluster_text},//cluster text (see above)
 											{"xst", elm327_seat_climate},//seat heat and ventilation (see above)
 											{"xlk", elm327_door_lock},//door lock (see above)
-											{"xal", elm327_autolock},//disconnect auto-lock (see above)
+											{"xau", elm327_approach},
+											{"xpk", elm327_standby},//parked BLE standby (see standby.h)
+                                        {"xoh", elm327_obd_handoff},
+                                        {"xal", elm327_autolock},//disconnect auto-lock (see above)
 											{"xul", elm327_door_unlock},//door unlock, BLE only, needs the app's key (see above)
 											{"xuk", elm327_unlock_key},//unlock key (see above)
 											{"xps", elm327_precon_setup},//car-shortcut setup (see above)

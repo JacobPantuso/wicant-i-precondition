@@ -62,6 +62,9 @@ static _Atomic bool pending_unlock;
 // CAN task only.
 static burst_t burst = BURST_NONE;
 static int step;
+static bool burst_ok;
+static _Atomic uint32_t locks_completed;
+static _Atomic uint32_t unlocks_completed;
 static uint16_t seat_levels;
 
 static _Atomic uint32_t seat_requests;
@@ -154,9 +157,15 @@ void bodycmd_request_lock_local(void)
     atomic_fetch_add(&lock_requests, 1);
 }
 
+void bodycmd_cancel_local_lock(void)
+{
+    atomic_store(&pending_lock_local, false);
+}
+
 void bodycmd_request_unlock(void)
 {
     atomic_store(&pending_lock, false);
+    atomic_store(&pending_lock_local, false);
     atomic_store(&pending_unlock, true);
     atomic_fetch_add(&unlock_requests, 1);
 }
@@ -198,7 +207,7 @@ static void build_frame(burst_t b, int n, uint8_t data[8])
     data[5] = (uint8_t)(levels & 0xFFU);
 }
 
-static void send_frame(const uint8_t data[8])
+static bool send_frame(const uint8_t data[8])
 {
     twai_message_t msg;
     memset(&msg, 0, sizeof(msg));
@@ -207,7 +216,9 @@ static void send_frame(const uint8_t data[8])
     memcpy(msg.data, data, 8);
     if (can_send(BODY_BUS, &msg, 1) == ESP_OK) {
         atomic_fetch_add(&frames, 1);
+        return true;
     }
+    return false;
 }
 
 void bodycmd_tick(bool link_up)
@@ -236,12 +247,15 @@ void bodycmd_tick(bool link_up)
             burst = BURST_SEATS;
         }
         step = 0;
+        burst_ok = true;
         atomic_store(&busy, true);
     }
     uint8_t data[8];
     build_frame(burst, step, data);
-    send_frame(data);
+    burst_ok = send_frame(data) && burst_ok;
     if (++step == burst_length(burst)) {
+        if (burst_ok && burst == BURST_LOCK) atomic_fetch_add(&locks_completed, 1);
+        if (burst_ok && burst == BURST_UNLOCK) atomic_fetch_add(&unlocks_completed, 1);
         burst = BURST_NONE;
         atomic_store(&busy, false);
     }
@@ -253,5 +267,7 @@ void bodycmd_get_status(bodycmd_status_t *out)
     out->lock_requests = atomic_load(&lock_requests);
     out->unlock_requests = atomic_load(&unlock_requests);
     out->frames = atomic_load(&frames);
+    out->locks_completed = atomic_load(&locks_completed);
+    out->unlocks_completed = atomic_load(&unlocks_completed);
     out->busy = atomic_load(&busy);
 }
