@@ -100,6 +100,15 @@ __attribute__((weak)) void obd_handoff_note_on(void) {}
 // isn't started and no door was reported open, relock as a fob would.
 #define APPROACH_GRACE_US  (15LL * 1000 * 1000)
 #define APPROACH_RELOCK_US (30LL * 1000 * 1000)
+// After an approach unlock, each time the doors shut again: 15 s in which only
+// a clear walk-off locks, the phone past the line for 5 s straight. No quick
+// 1 s lock and no Short 1.5 s hold. Going around the car to the other door
+// dipped the phone to -80 against a -72 line and the Short hold relocked
+// 2.6 s after the door shut (2026-11-25 07:22:05). A door that opens again
+// suspends it; the next close starts another 15 s. Sitting in the car is the
+// app's seat hold (ATXALB1), READY disarms, and both cover what comes after.
+#define DOOR_GRACE_US      (15LL * 1000 * 1000)
+#define DOOR_GRACE_HOLD_US (5LL * 1000 * 1000)
 #define THRESHOLD_MIN   (-100)
 #define THRESHOLD_MAX   (-40)
 
@@ -148,6 +157,8 @@ static bool frame_ready_last;      // car_in_ready() at the previous tick
 static int64_t hold_set_us;        // when the app last set its hold (ATXALB1)
 static int64_t ready_off_us;       // when the bus last said not-READY; 0 = on/unknown
 static int64_t grace_until_us;     // 0 = no post-approach grace
+static bool arrival;               // parked since an approach unlock, not yet driven or locked
+static int64_t door_grace_until_us; // 0 = no grace after a door shut on arrival
 static int64_t relock_at_us;       // 0 = no "not started" relock pending
 static bool relock_in_flight;      // the burst being verified is that relock
 
@@ -253,6 +264,12 @@ static void reset_signal(void)
     near_since = 0;
 }
 
+static void end_arrival(void)
+{
+    arrival = false;
+    door_grace_until_us = 0;
+}
+
 static bool app_holds(void)
 {
     return hold_until_ms != 0 || obd_handoff_blocks(); // Direct ownership requires a fresh validated read.
@@ -325,6 +342,8 @@ void autolock_approach_unlocked(void)
     armed_at_us = esp_timer_get_time();
     grace_until_us = armed_at_us + APPROACH_GRACE_US;
     relock_at_us = armed_at_us + APPROACH_RELOCK_US;
+    arrival = true;
+    door_grace_until_us = 0;
     hold_until_us = 0;
     reset_signal();
     ESP_LOGI(TAG, "authenticated return; observing the next departure");
@@ -381,6 +400,18 @@ static void sample(int rssi, int64_t now)
             quick_since = 0;
             return;
         }
+        if (door_grace_until_us && now < door_grace_until_us) {
+            // A door just shut on arrival: only 5 s straight past the line.
+            if (away_since && now - away_since >= DOOR_GRACE_HOLD_US) {
+                char why[64];
+                snprintf(why, sizeof(why), "phone at %d dBm (line %d) for 5 s after a door shut",
+                         (int)smoothed, threshold);
+                away_since = 0;
+                quick_since = 0;
+                fire(why);
+            }
+            return;
+        }
         bool quick = quick_since && now - quick_since >= QUICK_HOLD_US;
         bool held = away_since && now - away_since >= signal_hold_us();
         if (quick || held) {
@@ -413,6 +444,7 @@ static void arm_after_drive(const char *source)
     armed_at_us = esp_timer_get_time();
     grace_until_us = 0;   // a new drive's departure: no leftover approach state
     relock_at_us = 0;
+    end_arrival();
     reset_signal();
     if (!connected && armed) hold_until_us = armed_at_us + HOLD_US;
     ESP_LOGI(TAG, "drive ended (%s); %s", source,
@@ -442,6 +474,7 @@ void autolock_tick(void)
         armed = false;
         grace_until_us = 0;
         relock_at_us = 0; // started: no "not started" relock
+        end_arrival();
         ready_off_us = 0;
         bodycmd_cancel_local_lock();
         hold_until_us = 0;
@@ -558,6 +591,7 @@ void autolock_tick(void)
             standby_note_locked("walk-away");
             count++;
             armed = false;   // until the phone comes back to the car
+            end_arrival();
             verify_until_us = 0;
             persist();
             ESP_LOGI(TAG, "lock sequence on the bus (%lu total)", (unsigned long)count);
@@ -568,6 +602,7 @@ void autolock_tick(void)
             relock_in_flight = false;
             count++;
             armed = false;
+            end_arrival();
             verify_until_us = 0;
             persist();
             ESP_LOGW(TAG, "lock burst %s", result_name(last));
@@ -583,7 +618,7 @@ static bool autolock_apply_command(const char *,char *,size_t);
 void autolock_handoff_invalidate(void)
 {
     armed=false;obd_off=false;parked=false;ready_seen=false;
-    grace_until_us=0;relock_at_us=0;relock_in_flight=false;
+    grace_until_us=0;relock_at_us=0;relock_in_flight=false;end_arrival();
     hold_until_ms=1;hold_until_us=0;verify_until_us=0;
     bodycmd_cancel_local_lock();reset_signal();approach_reset_session();
 }
@@ -604,6 +639,7 @@ void autolock_owner_locked(void)
     hold_until_us = 0;
     grace_until_us = 0;
     relock_at_us = 0;
+    end_arrival();
     bodycmd_cancel_local_lock();
     reset_signal();
     approach_departed();
@@ -647,6 +683,7 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
             armed = false;
             grace_until_us = 0;
             relock_at_us = 0;
+            end_arrival();
             bodycmd_cancel_local_lock();
             hold_until_us = 0;
             reset_signal();
@@ -676,7 +713,15 @@ static bool autolock_apply_command(const char *args, char *response, size_t resp
                 until = 1;
             }
         }
+        bool released = hold_until_ms != 0 && until == 0;
         hold_until_ms = until;
+        if (released && arrival && armed && parked && !car_in_ready_fresh()) {
+            // The doors shut on arrival: a fresh 15 s, ending the walk-up
+            // grace, in which only a clear 5 s walk-off locks.
+            grace_until_us = 0;
+            door_grace_until_us = esp_timer_get_time() + DOOR_GRACE_US;
+            ESP_LOGI(TAG, "door shut after the approach unlock; 15 s grace");
+        }
         if (until != 0) {
             hold_set_us = esp_timer_get_time();
             bodycmd_cancel_local_lock();

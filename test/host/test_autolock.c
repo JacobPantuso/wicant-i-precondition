@@ -45,8 +45,9 @@ static void reset(void) {
     parked = false; connected = true; hold_until_us = 0; verify_until_us = 0;
     hold_until_ms = 0; count = 0; disconnected_at_us = 0; frame_ready_last = false; reset_signal();
     grace_until_us = relock_at_us = 0; relock_in_flight = false; departed_calls = relocked_calls = 0;
-    hold_set_us = ready_off_us = 0;
+    hold_set_us = ready_off_us = 0; arrival = false; door_grace_until_us = 0; was_blocked = false;
 }
+static void samples(int n, int rssi) { for (int i = 0; i < n; i++) { fake_now += 500000; sample(rssi, fake_now); } }
 static void off_after_drive(void) { command("p1"); command("p0"); CHECK(armed); }
 int main(void) {
     reset(); command("p0"); CHECK(!armed);
@@ -179,5 +180,46 @@ int main(void) {
     // Walk-away lock switched off: the edge parks but doesn't arm.
     reset(); enabled = false; fake_ready = fake_frame_ready = true; autolock_tick();
     fake_ready = fake_frame_ready = false; autolock_tick(); CHECK(!armed && parked);
+    // Arrival: approach unlock, a door opens and shuts, then the owner walks
+    // round the car to the driver's door (2026-11-25 07:22:05: -80 against a
+    // -72 line relocked 2.6 s after the door shut).
+    reset(); threshold = -72; off_after_drive(); armed = false; autolock_approach_unlocked();
+    fake_now += 3000000; command("b1"); samples(16, -60);    // door open 8 s
+    command("b0"); CHECK(door_grace_until_us && !grace_until_us);
+    samples(5, -80); samples(4, -60);                         // 2.5 s past the line, then back
+    CHECK(requests == 0);
+    // ...and sitting in again (seat hold) through the end of the grace: no lock.
+    command("b1"); samples(30, -90); CHECK(requests == 0);
+    // Each close starts a fresh 15 s.
+    command("b0"); int64_t first = door_grace_until_us;
+    samples(4, -60); command("b1"); samples(2, -60); command("b0");
+    CHECK(door_grace_until_us > first);
+    // The app repeats its clear every poll: that doesn't restart the grace.
+    first = door_grace_until_us; fake_now += 2500000; command("b0"); CHECK(door_grace_until_us == first);
+    // A slower walk round, 4 s behind the car, doesn't lock either.
+    reset(); threshold = -72; off_after_drive(); armed = false; autolock_approach_unlocked();
+    command("b1"); samples(4, -60); command("b0");
+    samples(9, -82); samples(4, -60); CHECK(requests == 0);
+    // A clear walk-off inside the grace still locks, after 5 s, not 1.
+    reset(); threshold = -72; off_after_drive(); armed = false; autolock_approach_unlocked();
+    command("b1"); samples(4, -60); command("b0");
+    samples(10, -95); CHECK(requests == 0);                   // first reading starts the clock
+    samples(1, -95); CHECK(requests == 1);
+    fake_body.locks_completed = 1; autolock_tick(); CHECK(!arrival && !door_grace_until_us);
+    // After the grace, the normal rules: the Short line's 1.5 s hold.
+    reset(); threshold = -72; off_after_drive(); armed = false; autolock_approach_unlocked();
+    command("b1"); samples(4, -60); command("b0");
+    samples(32, -60); CHECK(fake_now >= door_grace_until_us && requests == 0);
+    samples(5, -80); CHECK(requests == 1);
+    // A drive's departure isn't an arrival: a door shutting starts no grace.
+    reset(); threshold = -72; off_after_drive(); command("b1"); command("b0");
+    CHECK(!door_grace_until_us);
+    samples(5, -80); CHECK(requests == 1);
+    // Starting the car ends the arrival.
+    reset(); off_after_drive(); armed = false; autolock_approach_unlocked();
+    command("b1"); command("b0"); CHECK(door_grace_until_us);
+    fake_ready = fake_frame_ready = true; autolock_tick(); CHECK(!arrival && !door_grace_until_us);
+    threshold = -85;
+
     return test_report("autolock");
 }
